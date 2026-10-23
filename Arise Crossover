@@ -1,0 +1,2047 @@
+-- FOUR HUB - versão organizada por abas
+-- Estrutura:
+--   1. Serviços e biblioteca Fluent
+--   2. Janela e abas
+--   3. Funções compartilhadas e estados
+--   4. Sistemas principais
+--   5. Abas: Infinite, Gachas, Upgrades, Loja, Dungeon, Teleport e Misc
+--   6. Loops globais e persistência
+--
+-- Nota: a correção de inicialização tenta descarregar uma janela Fluent
+-- anterior antes de criar outra. A compatibilidade depende da versão do Fluent
+-- e dos nomes de objetos/eventos existentes no jogo.
+
+-- ===== SERVICES / VARS (unificados) =====
+local Players = game:GetService("Players")
+local Player = Players.LocalPlayer
+local Remote = game:GetService("ReplicatedStorage"):WaitForChild("BridgeNet2"):WaitForChild("dataRemoteEvent")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local VirtualUser = game:GetService("VirtualUser")
+
+-- Try to reuse existing Fluent loaded earlier; if not present, load a fallback
+local okFluent, Fluent = pcall(function()
+    return Fluent
+end)
+if not okFluent or not Fluent then
+    -- fallback loader (original had a different URL)
+    Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+end
+
+-- Safe notification wrapper (defensivo — evita crashes caso Fluent.Notify quebre)
+local _OrigFluentNotify = nil
+if Fluent and type(Fluent.Notify) == "function" then
+    _OrigFluentNotify = Fluent.Notify
+end
+
+local NotificationsEnabled = true
+
+local function SafeCallOriginalNotify(opts)
+    if not _OrigFluentNotify then return end
+    pcall(function()
+        _OrigFluentNotify(Fluent, opts)
+    end)
+end
+
+-- Substitui Fluent.Notify por uma versão segura que respeita NotificationsEnabled
+Fluent.Notify = function(self, opts)
+    if NotificationsEnabled then
+        SafeCallOriginalNotify(opts)
+    end
+end
+
+-- =========================================================
+-- FLUENT / WINDOW / TABS
+-- Evita o erro "You cannot create more than one window" ao executar
+-- novamente, tentando encerrar a janela anterior antes de criar outra.
+-- =========================================================
+
+-- Algumas versões do Fluent oferecem Unload(); outras não.
+-- A chamada protegida evita que a limpeza interrompa o script.
+pcall(function()
+    if Fluent and type(Fluent.Unload) == "function" then
+        Fluent:Unload()
+    end
+end)
+
+local Window = Fluent:CreateWindow({
+    Title = "FOUR HUB",
+    SubTitle = "v4.0 - Reorganizado",
+    Search = true,
+    TabWidth = 160,
+    Size = UDim2.fromOffset(600, 500),
+    Acrylic = true,
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.RightShift
+})
+
+-- Falha com uma mensagem clara caso a versão do Fluent não consiga criar a janela.
+if not Window then
+    error("[FOUR HUB] O Fluent não criou a janela. Verifique se já existe uma interface ativa ou atualize a biblioteca.")
+end
+
+local Tabs = {
+    -- Gamemode reúne Infinite e Dungeon na mesma aba.
+    Gamemode = Window:AddTab({Title = "Gamemode", Icon = "swords"}),
+
+    -- Gacha & Upgrades reúne os sistemas de rolagem e melhoria.
+    GachaUpgrades = Window:AddTab({Title = "Gacha & Upgrades", Icon = "arrow-up"}),
+
+    Loja = Window:AddTab({Title = "Loja", Icon = "shopping-cart"}),
+    Teleport = Window:AddTab({Title = "Teleport", Icon = "map"}),
+    Misc = Window:AddTab({Title = "Misc", Icon = "settings"})
+}
+
+local Options = Fluent.Options
+
+-- Aliases: os sistemas antigos passam a usar as abas unificadas.
+local InfiniteTab = Tabs.Gamemode
+local DungeonTab = Tabs.Gamemode
+local GachaTab = Tabs.GachaUpgrades
+local UpgradeTab = Tabs.GachaUpgrades
+local LojaTab = Tabs.Loja
+local TeleportTab = Tabs.Teleport
+local MiscTab = Tabs.Misc
+
+-- Minimizer opcional: usa o recurso se a versão do Fluent carregada oferecer suporte.
+local Minimizer = nil
+pcall(function()
+    if Fluent.CreateMinimizer then
+        Minimizer = Fluent:CreateMinimizer({
+            Icon = "home",
+            Size = UDim2.fromOffset(44, 44),
+            Position = UDim2.new(0, 320, 0, 24),
+            Acrylic = true,
+            Corner = 10,
+            Transparency = 1,
+            Draggable = true,
+            Visible = true
+        })
+    end
+end)
+
+-- ===========================
+-- (Original helper functions adjusted to use "\017")
+-- ===========================
+
+-- Remote helpers (kept for compatibility)
+local function ComprarItem(shop, item)
+    Remote:FireServer({
+        {
+            Shop = shop, Action = "Buy", Amount = 1, Item = item, Event = "ItemShopAction", Rank = 1
+        }, "\017"
+    })
+end
+
+local function FazerUpgrade(target, upgrader)
+    Remote:FireServer({
+        {
+            Target = target, Event = "UpgradeAction", Action = "Upgrade", Upgrade = upgrader
+        }, "\017"
+    })
+end
+
+local function FazerGacha(name)
+    Remote:FireServer({
+        {
+            GachaName = name, Event = "Gacha", Action = "Roll"
+        }, "\017"
+    })
+end
+
+local function CreateDungeon()
+    Remote:FireServer({
+        {
+            Event = "DungeonAction", Action = "Create"
+        }, "\017"
+    })
+end
+
+local function StartDungeon()
+    Remote:FireServer({
+        {
+            Dungeon = 4286839868, Event = "DungeonAction", Action = "Start"
+        }, "\017"
+    })
+end
+
+-- INFINITE helpers (StartRun, CreateRoom, StartBoss, CreateBoss) using "\017"
+local function StartRun(eventName, checkpoint)
+    Remote:FireServer({
+        {
+            Event = eventName,
+            Action = "Start",
+            Dungeon = 4286839868,
+            Check = tostring(checkpoint)
+        },
+        "\017"
+    })
+end
+
+local function CreateRoom(eventName)
+    Remote:FireServer({
+        {
+            Event = eventName,
+            Action = "Create"
+        },
+        "\017"
+    })
+end
+
+local function StartBoss(diff)
+    Remote:FireServer({
+        {
+            Event = "BossRushAction",
+            Action = "Start",
+            Dungeon = 4286839868,
+            Diff = diff
+        },
+        "\017"
+    })
+end
+
+local function CreateBoss()
+    Remote:FireServer({
+        {
+            Event = "BossRushAction",
+            Action = "Create"
+        },
+        "\017"
+    })
+end
+
+-- ===========================
+-- TOGGLES MASTER (kept original toggles structure)
+-- ===========================
+local Toggles = {
+    Exp = false, Core = false, Token = false, MoreRoom = false,
+    DungeonRank = false, DoubleDungeon = false,
+    ["Grass"] = false, ["Brum"] = false, ["FaceHeal"] = false, ["Xz"] = false, ["Mage"] = false, ["Shield"] = false,
+    ["Slayer"] = false, ["Ghoul"] = false, ["Eminance"] = false, ["Lucky"] = false, ["Hunters"] = false, ["Monarch"] = false,
+    ["Mori"] = false, ["Deadly"] = false, ["Sao"] = false, ["Zero"] = false,
+    AutoUpgradeGacha1 = false, AutoUpgradeGacha2 = false,
+    AutoUpgradeRunes = false, AutoUpgradeResource = false, AutoUpgradeKey = false,
+    AutoUpgradeBoosts = false, AutoUpgradeCores = false, AutoUpgradeTokens = false,
+    AutoDungeonSmart = false, AutoDungeonINF = false, AutoFarmCompleto = false,
+    NoClip = false, RemoveTeleportUI = false, AntiAFK = false, AutoExecute = false,
+    FPSBooster = false, StatsDashboard = false
+}
+
+local GachaGUI = {"Grass","Brum","FaceHeal","Xz","Mage","Shield","Slayer","Ghoul","Eminance","Lucky","Hunters","Monarch","Mori","Deadly","Sao","Zero"}
+local GachaRemoteNames = {
+    "NarutoClan","PirateCrew","BleachShikais","HeroRanksOPM","FrierenPartys","ShieldHeroArmaments","DemonMoons",
+    "KaguneTypes","EminenceRelics","BlackCloverGrimoires","SoloLevelingRanks","SoloLevelingRelics","JoestarBloodline",
+    "SinCrests","SaoGuilds","ReZeroWitchFactors"
+}
+
+for i, guiName in ipairs(GachaGUI) do
+    Toggles[guiName] = Toggles[guiName] or false
+end
+
+-- Shadow/Weapons upgrader maps (kept original)
+local ShadowGUI = {"Solo","Nipon","Dragon","Kindama","Nen","Hurricane","Cursed","Kaiju","Zero"}
+local WeaponsGUI = {"Solo","Nipon","Dragon","Kindama","Nen","Hurricane","Cursed","Kaiju","Zero"}
+
+local ShadowRemote = {
+    Solo = "LevelingUpgrader",
+    Nipon = "ChainsawUpgrader",
+    Dragon = "DragonCityUpgrader",
+    Kindama = "KindamaCityUpgrader",
+    Nen = "NenCityUpgrader",
+    Hurricane = "HurricaneUpgrader",
+    Cursed = "CursedHighUpgrader",
+    Kaiju = "KaijuUpgrader",
+    Zero = "ReZeroUpgrader"
+}
+
+local WeaponsRemote = {
+    Solo = "LevelingUpgrader",
+    Nipon = "ChainsawUpgrader",
+    Dragon = "DragonCityUpgrader",
+    Kindama = "KindamaCityUpgrader",
+    Nen = "NenCityUpgrader",
+    Hurricane = "HurricaneUpgrader",
+    Cursed = "CursedHighUpgrader",
+    Kaiju = "KaijuUpgrader",
+    Zero = "ReZeroUpgrader"
+}
+
+for i, name in ipairs(ShadowGUI) do
+    Toggles[name.."Shadow"] = false
+end
+for i, name in ipairs(WeaponsGUI) do
+    Toggles[name.."Weapons"] = false
+end
+
+-- ===========================
+-- FPS BOOSTER MOBILE (kept)
+-- ===========================
+local FPSBoosterActive = false
+
+local function BoostFPS()
+    if FPSBoosterActive then return end
+    FPSBoosterActive = true
+    
+    task.spawn(function()
+        pcall(function()
+            game.Lighting.GlobalShadows = false
+            game.Lighting.Brightness = 2
+            game.Lighting.Ambient = Color3.fromRGB(200, 200, 200)
+        end)
+        
+        for _, v in pairs(workspace:GetDescendants()) do
+            pcall(function()
+                if v:IsA("ParticleEmitter") then v.Enabled = false end
+                if v:IsA("Smoke") then v.Enabled = false end
+                if v:IsA("Fire") then v.Enabled = false end
+            end)
+        end
+        
+        for _, v in pairs(workspace:GetDescendants()) do
+            pcall(function()
+                if v:IsA("Decal") then v:Destroy() end
+            end)
+        end
+        
+        for _, v in pairs(workspace:GetDescendants()) do
+            pcall(function()
+                if v:IsA("BasePart") then
+                    v.Material = Enum.Material.Plastic
+                    v.CanCollide = true
+                end
+            end)
+        end
+        
+        pcall(function()
+            game.Lighting.EnvironmentDiffuseScale = 0
+            game.Lighting.EnvironmentSpecularScale = 0
+        end)
+    end)
+    
+    Fluent:Notify({Title = "FPS Booster", Content = "✅ Mobile otimizado! Lag removido!", Duration = 4})
+end
+
+-- ===========================
+-- STATS DASHBOARD (kept)
+-- ===========================
+local StatsActive = false
+local StatsUI = nil
+local StartTime = tick()
+local InitialCoins = 0
+local InitialExp = 0
+
+local function CreateStatsDashboard()
+    local PlayerGui = Player:WaitForChild("PlayerGui")
+    
+    local oldDash = PlayerGui:FindFirstChild("StatsDashboard")
+    if oldDash then oldDash:Destroy() end
+    
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "StatsDashboard"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = PlayerGui
+    
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 280, 0, 180)
+    mainFrame.Position = UDim2.new(0, 10, 0, 100)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    mainFrame.BorderSizePixel = 2
+    mainFrame.BorderColor3 = Color3.fromRGB(100, 200, 255)
+    mainFrame.Parent = screenGui
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = mainFrame
+    
+    local title = Instance.new("TextLabel")
+    title.Name = "Title"
+    title.Size = UDim2.new(1, 0, 0, 30)
+    title.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    title.BorderSizePixel = 0
+    title.Font = Enum.Font.GothamBold
+    title.Text = "📊 STATS"
+    title.TextColor3 = Color3.fromRGB(100, 200, 255)
+    title.TextSize = 16
+    title.Parent = mainFrame
+    
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 8)
+    titleCorner.Parent = title
+    
+    local stats = Instance.new("TextLabel")
+    stats.Name = "Stats"
+    stats.Size = UDim2.new(1, -10, 1, -40)
+    stats.Position = UDim2.new(0, 5, 0, 35)
+    stats.BackgroundTransparency = 1
+    stats.Font = Enum.Font.Gotham
+    stats.TextColor3 = Color3.fromRGB(200, 200, 200)
+    stats.TextSize = 12
+    stats.TextXAlignment = Enum.TextXAlignment.Left
+    stats.TextYAlignment = Enum.TextYAlignment.Top
+    stats.Text = "Tempo: 0m\nEXP/h: 0\nCoins/h: 0"
+    stats.Parent = mainFrame
+    
+    StatsUI = {Frame = mainFrame, Stats = stats, ScreenGui = screenGui}
+    return screenGui
+end
+
+local function UpdateStats()
+    if not StatsActive or not StatsUI then return end
+    
+    local elapsedTime = tick() - StartTime
+    local minutes = math.floor(elapsedTime / 60)
+    
+    local currentCoins = 0
+    local currentExp = 0
+    
+    pcall(function()
+        local leaderstats = Player:FindFirstChild("leaderstats")
+        if leaderstats then
+            if leaderstats:FindFirstChild("Coins") then
+                currentCoins = leaderstats.Coins.Value or 0
+            end
+            if leaderstats:FindFirstChild("Exp") then
+                currentExp = leaderstats.Exp.Value or 0
+            end
+            if leaderstats:FindFirstChild("Experience") then
+                currentExp = leaderstats.Experience.Value or 0
+            end
+        end
+    end)
+    
+    local coinsPerHour = 0
+    local expPerHour = 0
+    
+    if elapsedTime > 60 then
+        coinsPerHour = math.floor((currentCoins - InitialCoins) / (elapsedTime / 3600))
+        expPerHour = math.floor((currentExp - InitialExp) / (elapsedTime / 3600))
+    end
+    
+    if StatsUI and StatsUI.Stats then
+        StatsUI.Stats.Text = string.format(
+            "⏱️ Tempo: %dm\n💰 Coins/h: %d\n⭐ EXP/h: %d\n\n💵 Total: %d\n✨ EXP: %d",
+            minutes, coinsPerHour, expPerHour, currentCoins, currentExp
+        )
+    end
+end
+
+-- ===========================
+-- WEBHOOK LOGGER (kept)
+-- ===========================
+local WEBHOOK_URL = ""
+local WebhookActive = false
+
+local function SendWebhook(title, message, color)
+    if WEBHOOK_URL == "" or WEBHOOK_URL == nil then 
+        print("[WEBHOOK] URL não configurada!")
+        Fluent:Notify({Title = "Webhook", Content = "❌ URL não configurada!", Duration = 3})
+        return 
+    end
+    
+    task.spawn(function()
+        pcall(function()
+            local data = {
+                embeds = {{
+                    title = title,
+                    description = message,
+                    color = color or 3447003,
+                    timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+                }}
+            }
+            
+            local json = HttpService:JSONEncode(data)
+            HttpService:PostAsync(WEBHOOK_URL, json, Enum.HttpContentType.ApplicationJson)
+            print("[WEBHOOK] ✅ Mensagem enviada com sucesso!")
+        end)
+    end)
+end
+
+local function LogLoot(itemName, quantity, rarity)
+    SendWebhook("🎁 LOOT ENCONTRADO", string.format("**%s** x%d\n*Raridade: %s*", itemName, quantity, rarity), 16776960)
+end
+
+local function LogBossKill(bossName, difficulty)
+    SendWebhook("💀 BOSS DERROTADO", string.format("**%s** - %s", bossName, difficulty), 16711680)
+end
+
+local function LogAchievement(achievementName)
+    SendWebhook("🏆 ACHIEVEMENT", achievementName, 65280)
+end
+
+-- ===========================
+-- AUTO DUNGEON SMART (kept)
+-- ===========================
+local AutoDungeonSmart = {Active = false, Loop = nil, CheckInterval = 0.3}
+
+local function CountNPCs()
+    local serverFolder = workspace:FindFirstChild("__Main")
+    if not serverFolder then return 0 end
+    serverFolder = serverFolder:FindFirstChild("__Enemies")
+    if not serverFolder then return 0 end
+    serverFolder = serverFolder:FindFirstChild("Server")
+    if not serverFolder then return 0 end
+    local count = 0
+    for _, child in ipairs(serverFolder:GetChildren()) do
+        if child:IsA("BasePart") or child:IsA("MeshPart") or child:IsA("Model") then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+local function PortalExists()
+    local worldFolder = workspace:FindFirstChild("__Main")
+    if not worldFolder then return false end
+    worldFolder = worldFolder:FindFirstChild("__World")
+    if not worldFolder then return false end
+    for _, model in ipairs(worldFolder:GetDescendants()) do
+        if model.Name == "FirePortal" or model.Name == "DungeonSpawn" or model.Name == "DoubleDungeonSpawn" then
+            return true
+        end
+    end
+    return false
+end
+
+local function WaitForNPCsToSpawn()
+    local startTime = tick()
+    local maxWait = 8
+    while tick() - startTime < maxWait do
+        if CountNPCs() > 0 then
+            return true
+        end
+        task.wait(0.3)
+    end
+    return false
+end
+
+local function SmartDungeonLoop()
+    local zeroNPCTime = 0
+    local hadNPCs = false
+    while AutoDungeonSmart.Active do
+        local currentNPCs = CountNPCs()
+        local hasPortal = PortalExists()
+        if currentNPCs > 0 then
+            hadNPCs = true
+            zeroNPCTime = 0
+        end
+        if currentNPCs == 0 and hasPortal and hadNPCs then
+            CreateDungeon()
+            task.wait(0.5)
+            StartDungeon()
+            WaitForNPCsToSpawn()
+            hadNPCs = false
+            zeroNPCTime = 0
+        elseif currentNPCs == 0 and not hasPortal and hadNPCs then
+            zeroNPCTime = zeroNPCTime + AutoDungeonSmart.CheckInterval
+            if zeroNPCTime >= 6 then
+                CreateDungeon()
+                task.wait(0.5)
+                StartDungeon()
+                WaitForNPCsToSpawn()
+                hadNPCs = false
+                zeroNPCTime = 0
+            end
+        end
+        task.wait(AutoDungeonSmart.CheckInterval)
+    end
+end
+
+function AutoDungeonSmart:Start()
+    if self.Active then return end
+    self.Active = true
+    self.Loop = task.spawn(SmartDungeonLoop)
+    Fluent:Notify({Title = "Auto Dungeon", Content = "✅ Ativado!", Duration = 3})
+end
+
+function AutoDungeonSmart:Stop()
+    if not self.Active then return end
+    self.Active = false
+    if self.Loop then task.cancel(self.Loop) end
+    Fluent:Notify({Title = "Auto Dungeon", Content = "❌ Desativado!", Duration = 3})
+end
+
+-- ===========================
+-- AUTO FARM SYSTEM (kept)
+-- ===========================
+local AutoFarmSystem = {Active = false, MainLoop = nil}
+local CONFIG = {
+    ISLANDS = {"Solo2World", "Solo3World", "TokyoWorld", "KaijuWorld"},
+    TP_DELAY = 0.5,
+    CHECK_DELAY = 0.5,
+    GIGANTE_CFRAME = CFrame.new(
+    5474.10059, 34.8206902, 2421.89062,
+    0.923500896, 0.375369132, -0.0790196285,
+    -0.310007632, 0.851654828, 0.422586441,
+    0.225923359, -0.365762293, 0.902871311
+)
+}
+local function WaitForPath(root, ...)
+    local current = root
+    for _, name in ipairs({...}) do
+        if not current then return nil end
+        current = current:WaitForChild(name, 15)
+    end
+    return current
+end
+
+local ClientEnemies = WaitForPath(workspace, "__Main", "__Enemies", "Client")
+local SpawnsFolder = WaitForPath(workspace, "__Extra", "__Spawns")
+
+Player.CharacterAdded:Connect(function(newChar)
+    HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
+end)
+
+local function UpdateCharacter()
+    local character = Player.Character or Player.CharacterAdded:Wait()
+    HumanoidRootPart = character:WaitForChild("HumanoidRootPart")
+end
+
+local function TeleportToIslandSpawn(islandName)
+    if not SpawnsFolder or not HumanoidRootPart then return false end
+    local spawnPoint = SpawnsFolder:FindFirstChild(islandName)
+    if spawnPoint then
+        HumanoidRootPart.CFrame = spawnPoint.CFrame + Vector3.new(0, 3, 0)
+        return true
+    end
+    return false
+end
+
+local function GetIslandNPCs(islandName)
+    local enemies = {}
+    if not ClientEnemies then return enemies end
+    local islandFolder = ClientEnemies:FindFirstChild(islandName)
+    if islandFolder then
+        for _, npc in ipairs(islandFolder:GetChildren()) do
+            if npc:IsA("Model") and npc:FindFirstChild("HumanoidRootPart") then
+                table.insert(enemies, npc)
+            end
+        end
+    end
+    return enemies
+end
+
+local function GetAllClientNPCs()
+    local enemies = {}
+    if not ClientEnemies then return enemies end
+    for _, islandFolder in ipairs(ClientEnemies:GetChildren()) do
+        if islandFolder:IsA("Folder") then
+            for _, npc in ipairs(islandFolder:GetChildren()) do
+                if npc:IsA("Model") and npc:FindFirstChild("HumanoidRootPart") then
+                    table.insert(enemies, npc)
+                end
+            end
+        end
+    end
+    return enemies
+end
+
+local function KillNPC(npc)
+    if not npc or not npc.Parent then return end
+    local npcRoot = npc:FindFirstChild("HumanoidRootPart")
+    if npcRoot then
+        HumanoidRootPart.CFrame = CFrame.new(npcRoot.Position + Vector3.new(0, 3, 0))
+    end
+end
+
+local function FarmIsland(islandName)
+    if not AutoFarmSystem.Active then return end
+    if not TeleportToIslandSpawn(islandName) then return false end
+    task.wait(1)
+    while AutoFarmSystem.Active do
+        local npcs = GetIslandNPCs(islandName)
+        if #npcs == 0 then break end
+        for _, npc in ipairs(npcs) do
+            if not AutoFarmSystem.Active then return false end
+            KillNPC(npc)
+            task.wait(CONFIG.TP_DELAY)
+        end
+        task.wait(CONFIG.CHECK_DELAY)
+    end
+    return true
+end
+
+local function FarmAllClientNPCs()
+    HumanoidRootPart.CFrame = CONFIG.GIGANTE_CFRAME
+    task.wait(1)
+    while AutoFarmSystem.Active do
+        local allNPCs = GetAllClientNPCs()
+        if #allNPCs == 0 then break end
+        for _, npc in ipairs(allNPCs) do
+            if not AutoFarmSystem.Active then return end
+            KillNPC(npc)
+            task.wait(CONFIG.TP_DELAY)
+        end
+        task.wait(CONFIG.CHECK_DELAY)
+    end
+end
+
+local function MainFarmLoop()
+    while AutoFarmSystem.Active do
+        for _, islandName in ipairs(CONFIG.ISLANDS) do
+            if not AutoFarmSystem.Active then break end
+            FarmIsland(islandName)
+            task.wait(1)
+        end
+        if AutoFarmSystem.Active then
+            FarmAllClientNPCs()
+        end
+        task.wait(3)
+    end
+end
+
+function AutoFarmSystem:Start()
+    if self.Active then return end
+    UpdateCharacter()
+    self.Active = true
+    self.MainLoop = task.spawn(function() MainFarmLoop() end)
+    Fluent:Notify({Title = "Auto Farm", Content = "✅ Sistema ativado!", Duration = 4})
+end
+
+function AutoFarmSystem:Stop()
+    if not self.Active then return end
+    self.Active = false
+    if self.MainLoop then task.cancel(self.MainLoop) end
+    Fluent:Notify({Title = "Auto Farm", Content = "❌ Desativado!", Duration = 3})
+end
+
+-- ===========================
+-- TELEPORT SYSTEM (kept)
+-- ===========================
+local TeleportSystem = {Active = false, UI = nil, Connections = {}}
+
+function TeleportSystem:Stop()
+    if not self.Active then return end
+    self.Active = false
+    for _, connection in pairs(self.Connections) do
+        if connection then pcall(function() connection:Disconnect() end) end
+    end
+    self.Connections = {}
+    if self.UI and self.UI.Button then
+        pcall(function() self.UI.Button.Parent:Destroy() end)
+    end
+    self.UI = nil
+    Fluent:Notify({Title = "Auto Dungeon/INF", Content = "❌ Desativado!", Duration = 3})
+end
+
+function TeleportSystem:Initialize()
+    if self.Active then return end
+    self.Active = true
+    local player = Players.LocalPlayer
+    local character = player.Character or player.CharacterAdded:Wait()
+    local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+    local CONFIG_TP = {TELEPORT_DISTANCE = 10, TELEPORT_OFFSET = Vector3.new(0, 2, 0), UPDATE_INTERVAL = 0.05, HIGHLIGHT_COLOR = Color3.fromRGB(255, 140, 0), OUTLINE_COLOR = Color3.fromRGB(255, 255, 255), PORTAL_CHECK_INTERVAL = 0.5, PROXIMITY_HOLD_TIME = 0.5}
+    local serverFolder = workspace:WaitForChild("__Main"):WaitForChild("__Enemies"):WaitForChild("Server")
+    local worldFolder = workspace:WaitForChild("__Main"):WaitForChild("__World")
+    local currentTargetIndex = 0
+    local highlightCache = {}
+    local partsCache = {}
+    local lastUpdate = 0
+    local isTeleporting = false
+    local allEnemiesDead = false
+    local isSystemActive = true
+    local loopToken = {}
+
+    local function createMobileUI()
+        local playerGui = player:WaitForChild("PlayerGui")
+        local oldUI = playerGui:FindFirstChild("TeleportSystemUI")
+        if oldUI then oldUI:Destroy() end
+        task.wait(0.1)
+        local screenGui = Instance.new("ScreenGui")
+        screenGui.Name = "TeleportSystemUI"
+        screenGui.ResetOnSpawn = false
+        screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        screenGui.IgnoreGuiInset = false
+        screenGui.DisplayOrder = 100
+        local mainButton = Instance.new("TextButton")
+        mainButton.Name = "ToggleButton"
+        mainButton.Size = UDim2.new(0, 100, 0, 45)
+        mainButton.Position = UDim2.new(1, -110, 0, 10)
+        mainButton.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+        mainButton.BorderSizePixel = 3
+        mainButton.BorderColor3 = Color3.fromRGB(255, 255, 255)
+        mainButton.Font = Enum.Font.GothamBold
+        mainButton.Text = "ATIVO"
+        mainButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        mainButton.TextSize = 16
+        mainButton.TextScaled = true
+        mainButton.AutoButtonColor = true
+        mainButton.ZIndex = 101
+        mainButton.Active = true
+        mainButton.Parent = screenGui
+        local textPadding = Instance.new("UIPadding")
+        textPadding.PaddingLeft = UDim.new(0, 5)
+        textPadding.PaddingRight = UDim.new(0, 5)
+        textPadding.PaddingTop = UDim.new(0, 5)
+        textPadding.PaddingBottom = UDim.new(0, 5)
+        textPadding.Parent = mainButton
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 8)
+        corner.Parent = mainButton
+        local statusLabel = Instance.new("TextLabel")
+        statusLabel.Name = "StatusLabel"
+        statusLabel.Size = UDim2.new(0, 100, 0, 25)
+        statusLabel.Position = UDim2.new(1, -110, 0, 60)
+        statusLabel.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        statusLabel.BorderSizePixel = 2
+        statusLabel.BorderColor3 = Color3.fromRGB(255, 255, 255)
+        statusLabel.Font = Enum.Font.Gotham
+        statusLabel.Text = "Aguardando..."
+        statusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        statusLabel.TextSize = 12
+        statusLabel.TextScaled = true
+        statusLabel.ZIndex = 101
+        statusLabel.Parent = screenGui
+        local statusPadding = Instance.new("UIPadding")
+        statusPadding.PaddingLeft = UDim.new(0, 3)
+        statusPadding.PaddingRight = UDim.new(0, 3)
+        statusPadding.Parent = statusLabel
+        local statusCorner = Instance.new("UICorner")
+        statusCorner.CornerRadius = UDim.new(0, 6)
+        statusCorner.Parent = statusLabel
+        screenGui.Parent = playerGui
+        return mainButton, statusLabel
+    end
+
+    task.wait(0.5)
+    local toggleButton, statusLabel = createMobileUI()
+    self.UI = {Button = toggleButton, Status = statusLabel}
+
+    local function updateButtonAppearance()
+        if not toggleButton then return end
+        if isSystemActive then
+            toggleButton.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+            toggleButton.Text = "ATIVO"
+        else
+            toggleButton.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+            toggleButton.Text = "PAUSADO"
+        end
+    end
+
+    local function updateStatusLabel(text)
+        if statusLabel then statusLabel.Text = text end
+    end
+
+    local function toggleSystem()
+        isSystemActive = not isSystemActive
+        updateButtonAppearance()
+        updateStatusLabel(isSystemActive and "Sistema Ativo" or "Sistema Pausado")
+    end
+
+    task.wait(0.5)
+    if toggleButton then
+        -- Activated já cobre mouse, toque e gamepad; não registre os dois eventos.
+        table.insert(self.Connections, toggleButton.Activated:Connect(toggleSystem))
+    end
+    local inputConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == Enum.KeyCode.T then toggleSystem() end
+    end)
+    table.insert(self.Connections, inputConnection)
+
+    player.CharacterAdded:Connect(function(newChar)
+        character = newChar
+        humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+        currentTargetIndex = 0
+        allEnemiesDead = false
+    end)
+
+    local function getOrCreateHighlight(object)
+        if highlightCache[object] then return highlightCache[object] end
+        local highlight = object:FindFirstChild("Highlight")
+        if not highlight then
+            highlight = Instance.new("Highlight")
+            highlight.Name = "Highlight"
+            highlight.FillColor = CONFIG_TP.HIGHLIGHT_COLOR
+            highlight.OutlineColor = CONFIG_TP.OUTLINE_COLOR
+            highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            highlight.FillTransparency = 0.5
+            highlight.OutlineTransparency = 0
+            highlight.Parent = object
+        end
+        highlightCache[object] = highlight
+        return highlight
+    end
+
+    local function cleanupHighlights()
+        for object, highlight in pairs(highlightCache) do
+            if not object:IsDescendantOf(workspace) or not object.Parent then
+                if highlight and highlight.Parent then highlight:Destroy() end
+                highlightCache[object] = nil
+            end
+        end
+    end
+
+    local function updatePartsCache()
+        local validParts = {}
+        for _, part in ipairs(serverFolder:GetChildren()) do
+            if part:IsA("BasePart") or part:IsA("MeshPart") then
+                table.insert(validParts, part)
+            end
+        end
+        partsCache = validParts
+        if currentTargetIndex > #validParts then currentTargetIndex = 0 end
+        return validParts
+    end
+
+    local function getNextPart()
+        local parts = partsCache
+        if #parts == 0 then return nil end
+        currentTargetIndex = currentTargetIndex + 1
+        if currentTargetIndex > #parts then currentTargetIndex = 1 end
+        return parts[currentTargetIndex]
+    end
+
+    local function checkAllEnemiesDead()
+        local parts = updatePartsCache()
+        return #parts == 0
+    end
+
+    local function findFirePortal()
+        for _, model in ipairs(worldFolder:GetChildren()) do
+            if model:IsA("Model") then
+                local firePortal = model:FindFirstChild("FirePortal", true)
+                if firePortal then return firePortal end
+            end
+        end
+        return nil
+    end
+
+    local function activateProximityPrompt(portal)
+        if not portal then return false end
+        local proximityPrompt = portal:FindFirstChildOfClass("ProximityPrompt", true)
+        if not proximityPrompt then
+            for _, child in ipairs(portal:GetDescendants()) do
+                if child:IsA("ProximityPrompt") then
+                    proximityPrompt = child
+                    break
+                end
+            end
+        end
+        if proximityPrompt then
+            if portal:IsA("BasePart") or portal:IsA("MeshPart") then
+                humanoidRootPart.CFrame = CFrame.new(portal.Position)
+            elseif portal:IsA("Model") and portal.PrimaryPart then
+                humanoidRootPart.CFrame = CFrame.new(portal.PrimaryPart.Position)
+            end
+            task.wait(0.1)
+            proximityPrompt:InputHoldBegin()
+            task.wait(CONFIG_TP.PROXIMITY_HOLD_TIME)
+            proximityPrompt:InputHoldEnd()
+            updateStatusLabel("Portal ativado!")
+            return true
+        end
+        return false
+    end
+
+    local function teleportToPortal()
+        local portal = findFirePortal()
+        if portal then
+            updateStatusLabel("Indo ao portal...")
+            local targetPos
+            if portal:IsA("BasePart") or portal:IsA("MeshPart") then
+                targetPos = portal.Position
+            elseif portal:IsA("Model") and portal.PrimaryPart then
+                targetPos = portal.PrimaryPart.Position
+            else
+                local firstPart = portal:FindFirstChildWhichIsA("BasePart", true)
+                if firstPart then targetPos = firstPart.Position end
+            end
+            if targetPos then
+                humanoidRootPart.CFrame = CFrame.new(targetPos)
+                task.wait(0.2)
+                activateProximityPrompt(portal)
+                return true
+            end
+        end
+        return false
+    end
+
+    local function teleportToPart(part)
+        if not part or not character or not humanoidRootPart then return false end
+        if not part.Parent then return false end
+        local offset = Vector3.new(CONFIG_TP.TELEPORT_DISTANCE, 0, 0)
+        local targetCFrame = CFrame.new(part.Position + offset + CONFIG_TP.TELEPORT_OFFSET)
+        humanoidRootPart.CFrame = targetCFrame
+        updateStatusLabel(string.format("Inimigo %d/%d", currentTargetIndex, #partsCache))
+        return true
+    end
+
+    local function autoTeleportLoop()
+        while self.Active and isSystemActive and loopToken do
+            task.wait(0.5)
+            if not isSystemActive then
+                updateStatusLabel("Sistema Pausado")
+                continue
+            end
+            if isTeleporting then continue end
+            if checkAllEnemiesDead() and not allEnemiesDead then
+                allEnemiesDead = true
+                updateStatusLabel("Procurando portal...")
+                task.wait(0.5)
+                if not teleportToPortal() then
+                    updateStatusLabel("Aguardando portal...")
+                end
+            elseif not checkAllEnemiesDead() then
+                allEnemiesDead = false
+                local nextPart = getNextPart()
+                if nextPart then
+                    isTeleporting = true
+                    teleportToPart(nextPart)
+                    task.wait(0.1)
+                    isTeleporting = false
+                end
+            end
+        end
+    end
+
+    local function applyHighlights()
+        for _, part in ipairs(serverFolder:GetChildren()) do
+            if (part:IsA("BasePart") or part:IsA("MeshPart")) and part:IsDescendantOf(workspace) then
+                pcall(function() getOrCreateHighlight(part) end)
+            end
+        end
+    end
+
+    local portalConnection = worldFolder.DescendantAdded:Connect(function(descendant)
+        if descendant.Name == "FirePortal" then
+            if allEnemiesDead and isSystemActive then
+                task.wait(0.5)
+                teleportToPortal()
+            end
+        end
+    end)
+    table.insert(self.Connections, portalConnection)
+
+    local enemyAddedConnection = serverFolder.ChildAdded:Connect(function(child)
+        task.wait(0.05)
+        if child:IsA("BasePart") or child:IsA("MeshPart") then
+            updatePartsCache()
+            allEnemiesDead = false
+            updateStatusLabel(string.format("%d inimigos", #partsCache))
+        end
+    end)
+    table.insert(self.Connections, enemyAddedConnection)
+
+    local enemyRemovedConnection = serverFolder.ChildRemoved:Connect(function(child)
+        updatePartsCache()
+        updateStatusLabel(string.format("%d inimigos", #partsCache))
+    end)
+    table.insert(self.Connections, enemyRemovedConnection)
+
+    local heartbeatConnection = RunService.Heartbeat:Connect(function()
+        if not isSystemActive then return end
+        local now = tick()
+        if now - lastUpdate < CONFIG_TP.UPDATE_INTERVAL then return end
+        lastUpdate = now
+        cleanupHighlights()
+        updatePartsCache()
+        applyHighlights()
+    end)
+    table.insert(self.Connections, heartbeatConnection)
+
+    updatePartsCache()
+    local totalParts = #partsCache
+    if totalParts > 0 then
+        updateStatusLabel(string.format("%d inimigos", totalParts))
+    else
+        updateStatusLabel("Aguardando...")
+    end
+
+    task.spawn(autoTeleportLoop)
+    Fluent:Notify({Title = "Auto Dungeon/INF", Content = "✅ Sistema ativado!", Duration = 4})
+end
+
+-- =========================================================
+-- ABA 1: INFINITE
+-- Variáveis, helpers e controles da aba Infinite.
+-- =========================================================
+
+-- === INFINITE / MAP (Castelo/Deserto/Boss) ===
+-- Use checkpoint lists from original/new
+local checkpointsCastelo = {30,60,90,120,150,180,210,240,270,300,330,360,390,420,450}
+local checkpointsDeserto = {30,60,90,120,150,180,210,240,270,300,330,360,390,420,450,480,510,540,570,600,630,660,690}
+local bossList = { "Easy", "Normal", "Hard", "Insane", "Ultra", "Caótico", "Nightmare" }
+
+-- Castelo Section
+local TabCasteloSection = InfiniteTab:AddSection("Castelo Infinito🏰")
+local CasteloCheckpointValue = "30"
+local CasteloCheckpointInput = TabCasteloSection:AddInput("CasteloCheckpointInput", {
+    Title = "Digite o Checkpoint",
+    Description = "Informe qualquer número de checkpoint.",
+    Default = "30",
+    Placeholder = "Ex: 30, 600, 999",
+    NumericOnly = true,
+    Finished = false,
+    Callback = function(value)
+        CasteloCheckpointValue = tostring(value or "")
+    end
+})
+TabCasteloSection:AddButton({
+    Title = "Criar sala + Iniciar 🏰",
+    Callback = function()
+        local value = tonumber(CasteloCheckpointValue)
+        if value and value >= 0 then
+            CreateRoom("InfiniteCastleAction")
+            task.wait(0.3)
+            StartRun("InfiniteCastleAction", value)
+            Fluent:Notify({Title = "Infinite", Content = "✅ Castelo: sala criada e iniciada ("..tostring(value).."s)", Duration = 3})
+        else
+            Fluent:Notify({Title = "Infinite", Content = "❌ Selecione um checkpoint!", Duration = 2})
+        end
+    end
+})
+
+-- Deserto Section
+local TabDesertoSection = InfiniteTab:AddSection("Deserto 🏜️")
+local DesertoCheckpointValue = "30"
+local DesertoCheckpointInput = TabDesertoSection:AddInput("DesertoCheckpointInput", {
+    Title = "Digite o Checkpoint",
+    Description = "Informe qualquer número de checkpoint.",
+    Default = "30",
+    Placeholder = "Ex: 30, 600, 999",
+    NumericOnly = true,
+    Finished = false,
+    Callback = function(value)
+        DesertoCheckpointValue = tostring(value or "")
+    end
+})
+TabDesertoSection:AddButton({
+    Title = "Criar sala + Iniciar 🏜️",
+    Callback = function()
+        local value = tonumber(DesertoCheckpointValue)
+        if value and value >= 0 then
+            CreateRoom("InfiniteModeAction")
+            task.wait(0.3)
+            StartRun("InfiniteModeAction", value)
+            Fluent:Notify({Title = "Infinite", Content = "✅ Deserto: sala criada e iniciada ("..tostring(value).."s)", Duration = 3})
+        else
+            Fluent:Notify({Title = "Infinite", Content = "❌ Selecione um checkpoint!", Duration = 2})
+        end
+    end
+})
+
+-- BossRush Section
+local TabBossRushSection = InfiniteTab:AddSection("BossRush 💀")
+
+local BossRushDropdown = TabBossRushSection:AddDropdown("BossRushDifficulty", {
+    Title = "Selecionar dificuldade",
+    Values = bossList,
+    Multi = false,
+    Default = 1
+})
+
+TabBossRushSection:AddButton({
+    Title = "Criar sala + Iniciar BossRush 💀",
+    Callback = function()
+        local difficulty = BossRushDropdown.Value
+
+        if not difficulty or difficulty == "" then
+            Fluent:Notify({
+                Title = "BossRush",
+                Content = "❌ Selecione uma dificuldade primeiro!",
+                Duration = 3
+            })
+            return
+        end
+
+        CreateBoss()
+        task.wait(0.3)
+        StartBoss(difficulty)
+
+        Fluent:Notify({
+            Title = "BossRush",
+            Content = "✅ Sala criada e BossRush iniciado: " .. tostring(difficulty),
+            Duration = 4
+        })
+    end
+})
+
+-- === Substituição: GACHAS / UPGRADES / LOJA
+-- We'll recreate the Gacha/Upgrader/Shop UI using the new script blocks you provided.
+
+-- =========================================================
+-- ABA 2: GACHAS
+-- Seleção, auto-roll e parada por raridade.
+-- =========================================================
+
+-- GACHAS / AUTO GACHA
+local GachaGroup = GachaTab:AddSection("Auto Gachas")
+-- map of display names and remote names from new script
+local gachaList = {
+    "Attack on Titan", "Black Clover", "Bleach", "Demon Moons", "Eminence Relics",
+    "Naruto Clan", "Jojo", "XZ", "Mage", "ReZero", "Brum", "Ghoul", "Sao", "Solo Lev",
+    "Nanatsu", "Shield", "Monarch City"
+}
+local gachaMap = {
+    ["Attack on Titan"]     = "AoTTitans",
+    ["Black Clover"]        = "BlackCloverGrimoires",
+    ["Bleach"]              = "BleachShikais",
+    ["Demon Moons"]         = "DemonMoons",
+    ["Eminence Relics"]     = "EminenceRelics",
+    ["Naruto Clan"]         = "NarutoClan",
+    ["Jojo"]                = "JoestarBloodline",
+    ["XZ"]                  = "HeroRanksOPM",
+    ["Mage"]                = "FrierenPartys",
+    ["ReZero"]              = "ReZeroWitchFactors",
+    ["Brum"]                = "PirateCrew",
+    ["Ghoul"]               = "KaguneTypes",
+    ["Sao"]                 = "SaoGuilds",
+    ["Solo Lev"]            = "SoloLevelingRanks",
+    ["Nanatsu"]             = "SinCrests",
+    ["Shield"]              = "ShieldHeroArmaments",
+    ["Monarch City"]        = "SoloLevelingRelics",
+}
+
+local selectedGacha = nil
+local autoRollRunning = false
+
+GachaGroup:AddDropdown("GachaSelect", {
+    Title = "Selecionar Gacha",
+    Values = gachaList,
+    Default = nil,
+    Callback = function(value)
+        selectedGacha = value
+        Fluent:Notify({Title = "Auto Gacha", Content = "Selecionada: " .. tostring(value), Duration = 3})
+    end
+})
+
+GachaGroup:AddToggle("AutoGachaToggle", {
+    Title = "Auto Roll Ativado",
+    Default = false,
+    Callback = function(state)
+        if state then
+            if not selectedGacha then
+                Fluent:Notify({Title = "Erro", Content = "Selecione uma gacha primeiro!", Duration = 5})
+                Fluent.Toggles.AutoGachaToggle:SetValue(false)
+                return
+            end
+
+            autoRollRunning = true
+            local realGachaName = gachaMap[selectedGacha] or selectedGacha
+
+            Fluent:Notify({Title = "Auto Gacha", Content = "Girando " .. selectedGacha .. " até a melhor raridade!", Duration = 6})
+
+            task.spawn(function()
+                while autoRollRunning do
+                    -- simplistic stop logic: if player's Gachas folder shows a high rarity, stop (best-effort)
+                    local shouldStop = false
+                    local gachasFolder = Player:FindFirstChild("Gachas")
+                    if gachasFolder then
+                        local gachaFolder = gachasFolder:FindFirstChild(realGachaName)
+                        if gachaFolder then
+                            local unlocked = gachaFolder:FindFirstChild("Unlocked")
+                            if unlocked then
+                                local attrs = unlocked:GetAttributes()
+                                for k,v in pairs(attrs) do
+                                    if string.match(k, "8$") or string.match(k, "Ultimate$") or string.match(k, "Mythic$") then
+                                        if unlocked:GetAttribute(k) == true then
+                                            shouldStop = true
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+
+                    if shouldStop then
+                        Fluent:Notify({Title = "Auto Gacha", Content = selectedGacha .. " - Melhor raridade obtida! Parando...", Duration = 8})
+                        autoRollRunning = false
+                        Fluent.Toggles.AutoGachaToggle:SetValue(false)
+                        break
+                    end
+
+                    local args = {
+                        {
+                            {
+                                GachaName = realGachaName,
+                                Event = "Gacha",
+                                Action = "Roll"
+                            },
+                            "\017"
+                        }
+                    }
+                    Remote:FireServer(unpack(args))
+                    task.wait(0.4)
+                end
+            end)
+        else
+            autoRollRunning = false
+            Fluent:Notify({Title = "Auto Gacha", Content = "Desativado", Duration = 3})
+        end
+    end
+})
+
+-- =========================================================
+-- ABA 3: UPGRADES
+-- Upgrader de Shadow/Weapons e upgrades de bag.
+-- =========================================================
+
+-- UPGRADES
+local UpgraderSection = UpgradeTab:AddSection("Auto Upgrader (Shadow/Weapons/Roll)")
+local upgraderList = {
+    "Cursed High", "Chainsaw", "Dragon City", "Hurricane", "Kaiju", "Kindam City", "ReZero", "Solo Leveling", "Nen City"
+}
+local upgraderMap = {
+    ["Cursed High"]   = "CursedHighUpgrader",
+    ["Chainsaw"]      = "ChainsawUpgrader",
+    ["Dragon City"]   = "DragonCityUpgrader",
+    ["Hurricane"]     = "HurricaneUpgrader",
+    ["Kaiju"]         = "KaijuUpgrader",
+    ["Kindam City"]   = "KindamCityUpgrader",
+    ["ReZero"]        = "ReZeroUpgrader",
+    ["Solo Leveling"] = "LevelingUpgrader",
+    ["Nen City"]      = "NenCityUpgrader",
+}
+local typeList = {"Shadow", "Weapons", "Roll"}
+
+local selectedUpgrader = nil
+local selectedType = nil
+local autoUpgraderRunning = false
+
+UpgraderSection:AddDropdown("UpgraderSelect", {
+    Title = "Selecionar Upgrader",
+    Values = upgraderList,
+    Default = nil,
+    Callback = function(value)
+        selectedUpgrader = value
+        Fluent:Notify({Title = "Upgrader", Content = "Selecionado: " .. tostring(value), Duration = 3})
+    end
+})
+
+UpgraderSection:AddDropdown("TypeSelect", {
+    Title = "Tipo de Upgrade",
+    Values = typeList,
+    Default = nil,
+    Callback = function(value)
+        selectedType = value
+        Fluent:Notify({Title = "Upgrader", Content = "Tipo: " .. tostring(value), Duration = 3})
+    end
+})
+
+UpgraderSection:AddToggle("AutoUpgraderToggle", {
+    Title = "Auto Upgrade Ativado",
+    Default = false,
+    Callback = function(state)
+        if state then
+            if not selectedUpgrader or not selectedType then
+                Fluent:Notify({Title = "Erro", Content = "Selecione o Upgrader e o Tipo primeiro!", Duration = 5})
+                Fluent.Toggles.AutoUpgraderToggle:SetValue(false)
+                return
+            end
+            autoUpgraderRunning = true
+            local realUpgradeName = upgraderMap[selectedUpgrader] or selectedUpgrader
+            Fluent:Notify({Title = "Auto Upgrader", Content = "Upando " .. selectedType .. " em " .. selectedUpgrader .. "!", Duration = 5})
+            task.spawn(function()
+                while autoUpgraderRunning do
+                    local args = {
+                        {
+                            {
+                                Target = selectedType,
+                                Event = "UpgradeAction",
+                                Action = "Upgrade",
+                                Upgrade = realUpgradeName
+                            },
+                            "\017"
+                        }
+                    }
+                    Remote:FireServer(unpack(args))
+                    task.wait(0.6)
+                end
+            end)
+        else
+            autoUpgraderRunning = false
+            Fluent:Notify({Title = "Auto Upgrader", Content = "Desativado", Duration = 3})
+        end
+    end
+})
+
+-- Upgrade Bag Section
+local UpgradeBagSection = UpgradeTab:AddSection("Upgrade Bag")
+local upgradeItens = { "Boosts", "Cores", "Keys", "Resource", "Runes", "Tokens" }
+local selectedUpgrade = nil
+local autoUpgradeRunning = false
+
+UpgradeBagSection:AddDropdown("UpgradeDropdown", {
+    Title = "Selecionar Upgrade",
+    Values = upgradeItens,
+    Default = nil,
+    Callback = function(value)
+        selectedUpgrade = value
+        Fluent:Notify({Title = "Auto Upgrade", Content = "Selecionado: " .. tostring(value), Duration = 3})
+    end
+})
+
+UpgradeBagSection:AddToggle("AutoUpgradeToggle", {
+    Title = "Auto Upgrade Ativado",
+    Default = false,
+    Callback = function(state)
+        if state then
+            if not selectedUpgrade then
+                Fluent:Notify({Title = "Erro", Content = "Selecione um upgrade primeiro!", Duration = 4})
+                Fluent.Toggles.AutoUpgradeToggle:SetValue(false)
+                return
+            end
+            autoUpgradeRunning = true
+            Fluent:Notify({Title = "Auto Upgrade", Content = "Comprando " .. selectedUpgrade .. " automaticamente!", Duration = 4})
+            task.spawn(function()
+                while autoUpgradeRunning do
+                    local args = {
+                        {
+                            {
+                                Target = selectedUpgrade,
+                                Event = "UpgradeAction",
+                                Action = "Upgrade",
+                                Upgrade = "StorageUpgrade"
+                            },
+                            "\017"
+                        }
+                    }
+                    Remote:FireServer(unpack(args))
+                    task.wait(0.6)
+                end
+            end)
+        else
+            autoUpgradeRunning = false
+            Fluent:Notify({Title = "Auto Upgrade", Content = "Desativado", Duration = 3})
+        end
+    end
+})
+
+-- =========================================================
+-- ABA 4: LOJA
+-- Compras automáticas e compra de Mística.
+-- =========================================================
+
+-- LOJA
+local ShopSection = LojaTab:AddSection("Auto Comprar Item da Loja")
+local lojaItens = {
+    "Rank Up Rune",
+    "Double Dungeon Rune",
+    "Core Rune",
+    "Token Rune",
+    "Exp Rune",
+    "More Room Rune"
+}
+local itemConfig = {
+    ["Rank Up Rune"]        = { Shop = "ExchangeShop", Item = "DgURankUpRune" },
+    ["Double Dungeon Rune"] = { Shop = "ExchangeShop", Item = "DgDoubleDungeonRune" },
+    ["Core Rune"]           = { Shop = "RuneShop",     Item = "DgCoreRune" },
+    ["Token Rune"]          = { Shop = "RuneShop",     Item = "DgTokenRune" },
+    ["Exp Rune"]            = { Shop = "RuneShop",     Item = "DgExpRune" },
+    ["More Room Rune"]      = { Shop = "RuneShop",     Item = "DgMoreRoomRune" }
+}
+local selectedItem = nil
+local autoBuyRunning = false
+
+ShopSection:AddDropdown("ShopItemDropdown", {
+    Title = "Selecionar Item",
+    Values = lojaItens,
+    Default = nil,
+    Search = true,
+    Callback = function(value)
+        selectedItem = value
+        Fluent:Notify({Title = "Loja", Content = "Item selecionado: " .. tostring(value), Duration = 3})
+    end
+})
+
+ShopSection:AddToggle("AutoBuyToggle", {
+    Title = "Auto Buy (Item Selecionado)",
+    Default = false,
+    Callback = function(state)
+        if state then
+            if not selectedItem then
+                Fluent:Notify({Title = "Erro", Content = "Selecione um item primeiro!", Duration = 4})
+                Fluent.Toggles.AutoBuyToggle:SetValue(false)
+                return
+            end
+            autoBuyRunning = true
+            Fluent:Notify({Title = "Auto Buy", Content = "Comprando " .. selectedItem .. " automaticamente!", Duration = 4})
+            task.spawn(function()
+                while autoBuyRunning do
+                    local config = itemConfig[selectedItem]
+                    if config then
+                        local args = {
+                            {
+                                {
+                                    Shop = config.Shop,
+                                    Action = "Buy",
+                                    Amount = 1,
+                                    Item = config.Item,
+                                    Event = "ItemShopAction",
+                                    Rank = 1
+                                },
+                                "\017"
+                            }
+                        }
+                        Remote:FireServer(unpack(args))
+                    end
+                    task.wait(0.6)
+                end
+            end)
+        else
+            autoBuyRunning = false
+            Fluent:Notify({Title = "Auto Buy", Content = "Desativado", Duration = 3})
+        end
+    end
+})
+
+-- Adicionar um novo Section (opcional, para separar visualmente)
+local MysticaSection = LojaTab:AddSection("Auto Comprar Mística")
+
+local autoMysticaRunning = false
+
+MysticaSection:AddToggle("AutoMysticaToggle", {
+    Title = "Auto Comprar Mística (x500)",
+    Default = false,
+    Callback = function(state)
+        if state then
+            autoMysticaRunning = true
+            Fluent:Notify({Title = "Auto Mística", Content = "Comprando EnchMythical x500 automaticamente!", Duration = 5})
+
+            task.spawn(function()
+                while autoMysticaRunning do
+                    local args = {
+                        {
+                            {
+                                Shop = "ExchangeShop",
+                                Action = "Buy",
+                                Amount = 500,
+                                Item = "EnchMythical",
+                                Event = "ItemShopAction",
+                                Rank = 1
+                            },
+                            "\017"
+                        }
+                    }
+                    Remote:FireServer(unpack(args))
+                    task.wait(0.6)  -- delay para não floodar o servidor (ajuste se quiser mais rápido)
+                end
+            end)
+        else
+            autoMysticaRunning = false
+            Fluent:Notify({Title = "Auto Mística", Content = "Desativado", Duration = 3})
+        end
+    end
+})
+
+-- =========================================================
+-- ABA 5: DUNGEON
+-- Dungeon manual, Auto Dungeon, Auto Farm e Reset.
+-- =========================================================
+
+-- DUNGEON
+local DungeonGroup = DungeonTab:AddSection("Dungeon Options")
+DungeonGroup:AddButton({Title = "Criar Dungeon", Callback = function()
+    CreateDungeon()
+    Fluent:Notify({Title = "Dungeon", Content = "✅ Criada!", Duration = 3})
+end})
+DungeonGroup:AddButton({Title = "Iniciar Dungeon", Callback = function()
+    StartDungeon()
+    Fluent:Notify({Title = "Dungeon", Content = "✅ Iniciada!", Duration = 3})
+end})
+
+-- Auto Dungeon Smart toggle (kept)
+local AutoDungeonGroup = DungeonTab:AddSection("Auto Dungeon")
+AutoDungeonGroup:AddToggle("AutoDungeonSmart", {Title = "Auto Dungeon Inteligente", Default = false, Callback = function(v)
+    Toggles.AutoDungeonSmart = v
+    if v then AutoDungeonSmart:Start() else AutoDungeonSmart:Stop() end
+end})
+
+-- Auto Dungeon INF (TeleportSystem) toggle
+AutoDungeonGroup:AddToggle("AutoDungeonINF", {Title = "Auto Dungeon/INF", Default = false, Callback = function(v)
+    Toggles.AutoDungeonINF = v
+    if v then TeleportSystem:Initialize() else TeleportSystem:Stop() end
+end})
+
+-- Auto Farm Complete (kept)
+local AutoFarmGroup = DungeonTab:AddSection("Auto Farm")
+AutoFarmGroup:AddToggle("AutoFarmCompleto", {Title = "Auto Farm Completo", Default = false, Callback = function(v)
+    Toggles.AutoFarmCompleto = v
+    if v then AutoFarmSystem:Start() else AutoFarmSystem:Stop() end
+end})
+
+-- Note: Auto Reset Dungeon (moved into Dungeon tab) - using the logic from the new script
+local autoResetEnabled = false
+
+AutoDungeonGroup:AddToggle("AutoDungeonReset", {
+    Title = "Reset Dungeon",
+    Default = false,
+    Callback = function(state)
+        autoResetEnabled = state
+
+        if state then
+            Fluent:Notify({Title = "Auto Dungeon Reset", Content = "Ativado! Esperando término da dungeon...", Duration = 6})
+
+            task.spawn(function()
+                while autoResetEnabled do
+                    -- Wait for dungeon finish detection
+                    local dungeonFinished = false
+                    repeat
+                        task.wait(0.4)
+                        local mainFolder = workspace:FindFirstChild("__Main")
+                        if mainFolder then
+                            local dungeonFolder = mainFolder:FindFirstChild("__Dungeon")
+                            if dungeonFolder and dungeonFolder:FindFirstChild("Dungeon") then
+                                dungeonFinished = true
+                            end
+                        end
+                    until dungeonFinished or not autoResetEnabled
+
+                    if not autoResetEnabled then break end
+
+                    Fluent:Notify({Title = "Auto Reset", Content = "Dungeon terminada! Resetando...", Duration = 5})
+
+                    -- 1. Pagar ticket com Gems
+                    Remote:FireServer({
+                        {
+                            Type = "Gems",
+                            Event = "DungeonAction",
+                            Action = "BuyTicket"
+                        },
+                        "\017"
+                    })
+
+                    task.wait(0.4)
+
+                    -- 2. Criar sala
+                    Remote:FireServer({
+                        {
+                            Event = "DungeonAction",
+                            Action = "Create"
+                        },
+                        "\017"
+                    })
+
+                    task.wait(0.5)
+
+                    -- 3. Iniciar dungeon
+                    Remote:FireServer({
+                        {
+                            Dungeon = 4286839868,
+                            Event = "DungeonAction",
+                            Action = "Start"
+                        },
+                        "\017"
+                    })
+
+                    Fluent:Notify({Title = "Auto Reset", Content = "Nova dungeon iniciada! Farmando...", Duration = 4})
+
+                    task.wait(0.6)
+                end
+            end)
+        else
+            Fluent:Notify({Title = "Auto Dungeon Reset", Content = "Desativado", Duration = 4})
+        end
+    end
+})
+
+-- =========================================================
+-- ABA 6: TELEPORT
+-- Teleportes para as ilhas disponíveis.
+-- =========================================================
+
+-- TELEPORT
+local WorldFolder = workspace:FindFirstChild("__Main") and workspace.__Main:FindFirstChild("__World")
+local SpawnsFolderTP = workspace:FindFirstChild("__Extra") and workspace.__Extra:FindFirstChild("__Spawns")
+
+local function TeleportToIsland(islandName)
+    local spawnPoint = SpawnsFolderTP and SpawnsFolderTP:FindFirstChild(islandName)
+    local char = Player.Character or Player.CharacterAdded:Wait()
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if spawnPoint and hrp then
+        if spawnPoint:IsA("BasePart") then hrp.CFrame = spawnPoint.CFrame + Vector3.new(0,3,0); Fluent:Notify({Title="Teleporte", Content="✅ "..islandName, Duration=3}); return true end
+        if spawnPoint:IsA("Model") and spawnPoint.PrimaryPart then hrp.CFrame = spawnPoint.PrimaryPart.CFrame + Vector3.new(0,5,0); Fluent:Notify({Title="Teleporte", Content="✅ "..islandName, Duration=3}); return true end
+    end
+    if WorldFolder and WorldFolder:FindFirstChild(islandName) then
+        local model = WorldFolder[islandName]
+        if model and model.PrimaryPart and hrp then hrp.CFrame = model.PrimaryPart.CFrame + Vector3.new(0,5,0); Fluent:Notify({Title="Teleporte", Content="✅ "..islandName, Duration=3}); return true end
+    end
+    Fluent:Notify({Title="Teleporte", Content="❌ "..tostring(islandName), Duration=3})
+    return false
+end
+
+local function GetAvailableIslands()
+    local islands = {}
+    if SpawnsFolderTP then
+        for _, spawn in ipairs(SpawnsFolderTP:GetChildren()) do
+            if spawn:IsA("BasePart") or spawn:IsA("Model") then table.insert(islands, spawn.Name) end
+        end
+    end
+    if #islands == 0 and WorldFolder then
+        for _, v in ipairs(WorldFolder:GetChildren()) do
+            if v:IsA("Model") then table.insert(islands, v.Name) end
+        end
+    end
+    local uniqueIslands, seen = {}, {}
+    for _, name in ipairs(islands) do if not seen[name] then table.insert(uniqueIslands, name); seen[name]=true end end
+    table.sort(uniqueIslands)
+    return uniqueIslands
+end
+
+local TeleportGroup = TeleportTab:AddSection("Ilhas")
+local availableIslands = GetAvailableIslands()
+if #availableIslands > 0 then
+    for _, islandName in ipairs(availableIslands) do
+        TeleportGroup:AddButton({Title = "🌍 " .. islandName, Callback = function()
+            TeleportToIsland(islandName)
+        end})
+    end
+end
+
+-- =========================================================
+-- ABA 7: MISC
+-- Notificações, proteção, performance, auto-execute e teclas.
+-- =========================================================
+-- ABA MISC (IGUAL À FOTO + AUTO EXECUTE COMPLETO)
+-- ==========================================================
+
+local scriptURL = "https://raw.githubusercontent.com/luuuuuuyyyyyyyy/Four-hubass/refs/heads/main/FourHub"
+
+-- 1. NOTIFICAÇÕES (IGUAL À FOTO)
+local NotificationsGroup = MiscTab:AddSection("Avisos") -- Título curto para não poluir
+
+NotificationsGroup:AddToggle("NotificationsToggle", {
+    Title = "Ativar Notificações do Script",
+    Description = "Liga/Desliga os avisos que aparecem no canto da tela.",
+    Default = true,
+    Callback = function(Value)
+        NotificationsEnabled = Value
+    end
+})
+
+-- 2. PROTEÇÃO E DUNGEON (IGUAL À FOTO)
+local AntiAFKGroup = MiscTab:AddSection("🛡️ Proteção e Dungeon")
+
+AntiAFKGroup:AddToggle("AntiAFK", {
+    Title = "Anti AFK (Ultra)", 
+    Default = false, 
+    Callback = function(v)
+        Toggles.AntiAFK = v
+        if v then
+            local idledSignal = game:GetService("Players").LocalPlayer.Idled
+            if getconnections then
+                for _, conn in pairs(getconnections(idledSignal)) do conn:Disable() end
+            end
+            getgenv().AntiAFKConnection = idledSignal:Connect(function()
+                game:GetService("VirtualUser"):CaptureController()
+                game:GetService("VirtualUser"):ClickButton2(Vector2.new())
+            end)
+            Fluent:Notify({Title = "Anti AFK", Content = "✅ Proteção Ativada!", Duration = 3})
+        else
+            if getgenv().AntiAFKConnection then getgenv().AntiAFKConnection:Disconnect() end
+        end
+    end
+})
+
+AntiAFKGroup:AddToggle("RemoveTeleportUI", {
+    Title = "Remover TeleportScreen (Dungeon)", 
+    Default = false, 
+    Callback = function(v)
+        Toggles.RemoveTeleportUI = v
+        local assets = game:GetService("ReplicatedStorage"):FindFirstChild("__Assets")
+        if v then
+            local screen = assets and assets:FindFirstChild("TeleportScreen")
+            if screen then
+                _G.TeleportScreenBackup = screen
+                _G.TeleportScreenParent = screen.Parent
+                screen.Parent = nil
+                Fluent:Notify({Title = "Dungeon", Content = "✅ Tela removida!", Duration = 3})
+            end
+        else
+            if _G.TeleportScreenBackup and _G.TeleportScreenParent then
+                _G.TeleportScreenBackup.Parent = _G.TeleportScreenParent
+            end
+        end
+    end
+})
+
+-- 3. PERFORMANCE E STATS (IGUAL À FOTO)
+local PerformanceGroup = MiscTab:AddSection("🚀 Performance e Stats")
+
+PerformanceGroup:AddButton({
+    Title = "FPS Booster Mobile", 
+    Callback = function()
+        Toggles.FPSBooster = true
+        BoostFPS()
+    end
+})
+
+PerformanceGroup:AddToggle("StatsDashboard", {
+    Title = "Ativar Dashboard de Stats", 
+    Default = false, 
+    Callback = function(v)
+        Toggles.StatsDashboard = v
+        if v then
+            CreateStatsDashboard()
+            StatsActive = true
+            StartTime = tick()
+            task.spawn(function()
+                while StatsActive do UpdateStats(); task.wait(1) end
+            end)
+        else
+            StatsActive = false
+            if StatsUI and StatsUI.ScreenGui then StatsUI.ScreenGui:Destroy() end
+        end
+    end
+})
+
+PerformanceGroup:AddButton({
+    Title = "Rejoin (Reentrar no Servidor)", 
+    Callback = function()
+        game:GetService("TeleportService"):Teleport(game.PlaceId, game.Players.LocalPlayer)
+    end
+})
+
+-- 4. AUTO EXECUTE (AGORA COM O TOGGLE QUE FALTAVA)
+local AutoExecSection = MiscTab:AddSection("💾 Auto Execute")
+
+AutoExecSection:AddButton({
+    Title = "Instalar no Auto-Exec",
+    Description = "Salva o script na pasta do executor para abrir sozinho.",
+    Callback = function()
+        if writefile then
+            local cmd = string.format('repeat task.wait() until game:IsLoaded(); loadstring(game:HttpGet("%s"))()', scriptURL)
+            writefile("FourHub_AutoExec.lua", cmd)
+            Fluent:Notify({Title = "Sucesso", Content = "Salvo na pasta autoexec!", Duration = 5})
+        end
+    end
+})
+
+-- A CHAVE QUE VOLTOU:
+AutoExecSection:AddToggle("AutoTeleportLoad", {
+    Title = "Persistência de Teleporte",
+    Description = "Faz o script reabrir ao entrar em Dungeons/Portais.",
+    Default = false,
+    Callback = function(Value)
+        Toggles.AutoExecute = Value
+        if Value and queue_on_teleport then
+            queue_on_teleport(string.format('loadstring(game:HttpGet("%s"))()', scriptURL))
+            Fluent:Notify({Title = "Ativado", Content = "Script carregará no próximo mapa!", Duration = 3})
+        end
+    end
+})
+
+-- ==========================================================
+-- AUTO KEY PRESSER (2 SLOTS) - INTEGRADO NA ABA MISC
+-- ==========================================================
+local AutoKeySection = MiscTab:AddSection("⌨️ Auto Team")
+
+local AutoKeyRunning = false
+
+-- Inputs Slot 1
+AutoKeySection:AddInput("KeySlot1", {
+    Title = "Tecla Slot 1",
+    Default = "1",
+    Placeholder = "Ex: 1 ou Q",
+    Callback = function() end -- Valor guardado em Fluent.Options
+})
+
+AutoKeySection:AddInput("TimeSlot1", {
+    Title = "Tempo Slot 1 (Segundos)",
+    Default = "1",
+    Placeholder = "Ex: 0.5",
+    Callback = function() end
+})
+
+-- Inputs Slot 2
+AutoKeySection:AddInput("KeySlot2", {
+    Title = "Tecla Slot 2",
+    Default = "G",
+    Placeholder = "Ex: G ou E",
+    Callback = function() end
+})
+
+AutoKeySection:AddInput("TimeSlot2", {
+    Title = "Tempo Slot 2 (Segundos)",
+    Default = "5",
+    Placeholder = "Ex: 2",
+    Callback = function() end
+})
+
+-- Toggle para Ligar/Desligar
+AutoKeySection:AddToggle("ToggleAutoKey", {
+    Title = "Ativar Auto Key",
+    Default = false,
+    Callback = function(Value)
+        AutoKeyRunning = Value
+        if Value then
+            Fluent:Notify({Title = "Auto Key", Content = "Sistema Iniciado!", Duration = 3})
+        end
+    end
+})
+
+-- LÓGICA DE CLIQUE (VIRTUAL USER)
+-- Slot 1 Loop
+task.spawn(function()
+    while true do
+        if AutoKeyRunning then
+            local tecla = Fluent.Options.KeySlot1 and tostring(Fluent.Options.KeySlot1.Value or "") or ""
+            local tempo = Fluent.Options.TimeSlot1 and tonumber(Fluent.Options.TimeSlot1.Value) or nil
+            
+            if tecla ~= "" and tempo and tempo > 0 then
+                pcall(function()
+                    local key = tecla:lower()
+                    if keypress and keyrelease then
+                        keypress(key)
+                        task.wait(0.05)
+                        keyrelease(key)
+                    else
+                        warn("[FOUR HUB] Auto Key requer keypress/keyrelease do executor")
+                    end
+                end)
+                task.wait(tempo)
+            else
+                task.wait(1)
+            end
+        else
+            task.wait(1)
+        end
+    end
+end)
+
+-- Slot 2 Loop
+task.spawn(function()
+    while true do
+        if AutoKeyRunning then
+            local tecla = Fluent.Options.KeySlot2 and tostring(Fluent.Options.KeySlot2.Value or "") or ""
+            local tempo = Fluent.Options.TimeSlot2 and tonumber(Fluent.Options.TimeSlot2.Value) or nil
+            
+            if tecla ~= "" and tempo and tempo > 0 then
+                pcall(function()
+                    local key = tecla:lower()
+                    if keypress and keyrelease then
+                        keypress(key)
+                        task.wait(0.05)
+                        keyrelease(key)
+                    else
+                        warn("[FOUR HUB] Auto Key requer keypress/keyrelease do executor")
+                    end
+                end)
+                task.wait(tempo)
+            else
+                task.wait(1)
+            end
+        else
+            task.wait(1)
+        end
+    end
+end)
+
+-- BOTÃO MOBILE
+if game:GetService("UserInputService").TouchEnabled then
+    local MobileToggleGui = Instance.new("ScreenGui", game:GetService("CoreGui"))
+    local MobileToggleButton = Instance.new("TextButton", MobileToggleGui)
+    local UICorner = Instance.new("UICorner", MobileToggleButton)
+    MobileToggleButton.Size = UDim2.new(0, 50, 0, 50)
+    MobileToggleButton.Position = UDim2.new(0.1, 0, 0.15, 0)
+    MobileToggleButton.Text = "4H"; MobileToggleButton.BackgroundColor3 = Color3.fromRGB(30,30,30); MobileToggleButton.TextColor3 = Color3.fromRGB(100,200,255); MobileToggleButton.Draggable = true
+    UICorner.CornerRadius = UDim.new(0, 10)
+    MobileToggleButton.MouseButton1Click:Connect(function() Window:Minimize() end)
+end
+
+-- =========================================================
+-- RUNTIME / LOOPS GLOBAIS
+-- Listeners e rotinas automáticas só começam depois que todas as abas foram criadas.
+-- =========================================================
+
+-- ===========================
+-- REMOTE.OnClientEvent listener (kept original StopGacha detection logic)
+-- ===========================
+local StopGacha = {}
+for i, gName in ipairs(GachaRemoteNames) do
+    StopGacha[gName] = false
+end
+
+Remote.OnClientEvent:Connect(function(args)
+    local ok, data = pcall(function() return args[1][1] end)
+    if not ok or not data then return end
+    if data.Equip and data.GachaName then
+        for i, gName in ipairs(GachaRemoteNames) do
+            if data.GachaName == gName then
+                if string.sub(tostring(data.Equip), -1) == "8" then
+                    StopGacha[gName] = true
+                    print("Raridade máxima encontrada em:", gName, "Equip:", data.Equip)
+                end
+            end
+        end
+    end
+end)
+
+-- Auto loops para loja, upgrades e gachas (intervalos controlados)
+task.spawn(function()
+    while true do
+        task.wait(0.35)
+        if Toggles.Exp then ComprarItem("RuneShop", "DgExpRune") end
+        if Toggles.Core then ComprarItem("RuneShop", "DgCoreRune") end
+        if Toggles.Token then ComprarItem("RuneShop", "DgTokenRune") end
+        if Toggles.MoreRoom then ComprarItem("RuneShop", "DgMoreRoomRune") end
+        if Toggles.DungeonRank then ComprarItem("ExchangeShop", "DgURankUpRune") end
+        if Toggles.DoubleDungeon then ComprarItem("ExchangeShop", "DgDoubleDungeonRune") end
+        if Toggles.AutoUpgradeGacha1 then FazerUpgrade("Gacha1","Gacha1") end
+        if Toggles.AutoUpgradeGacha2 then FazerUpgrade("Gacha2","Gacha2") end
+        if Toggles.AutoUpgradeRunes then FazerUpgrade("Runes","Runes") end
+        if Toggles.AutoUpgradeResource then FazerUpgrade("Resource","Resource") end
+        if Toggles.AutoUpgradeKey then FazerUpgrade("Keys","Keys") end
+        if Toggles.AutoUpgradeBoosts then FazerUpgrade("Boosts","Boosts") end
+        if Toggles.AutoUpgradeCores then FazerUpgrade("Cores","Cores") end
+        if Toggles.AutoUpgradeTokens then FazerUpgrade("Tokens","Tokens") end
+
+        for i, name in ipairs(ShadowGUI) do
+            if Toggles[name.."Shadow"] then
+                local rem = ShadowRemote[name]
+                if rem then FazerUpgrade("Shadow", rem) end
+            end
+        end
+        for i, name in ipairs(WeaponsGUI) do
+            if Toggles[name.."Weapons"] then
+                local rem = WeaponsRemote[name]
+                if rem then FazerUpgrade("Weapons", rem) end
+            end
+        end
+
+        for i, guiName in ipairs(GachaGUI) do
+            local gachaName = GachaRemoteNames[i]
+            if Toggles[guiName] and not StopGacha[gachaName] then
+                FazerGacha(gachaName)
+            end
+        end
+    end
+end)
+
+
+-- =========================================================
+-- PERSISTÊNCIA / SAVE
+-- =========================================================
+
+-- SISTEMA DE SAVE
+local SaveFileName = "FourHub_v3_Config.json"
+local function GlobalSave()
+    local ConfigToSave = {}
+    for Id, Option in pairs(Fluent.Options) do
+        if Option.Value ~= nil then ConfigToSave[Id] = Option.Value end
+    end
+    if writefile then writefile(SaveFileName, game:GetService("HttpService"):JSONEncode(ConfigToSave)) end
+end
+
+local function GlobalLoad()
+    if isfile and isfile(SaveFileName) then
+        local success, data = pcall(function() return game:GetService("HttpService"):JSONDecode(readfile(SaveFileName)) end)
+        if success then
+            for Id, Value in pairs(data) do
+                if Fluent.Options[Id] then Fluent.Options[Id]:SetValue(Value) end
+            end
+        end
+    end
+end
+
+GlobalLoad()
+for Id, Option in pairs(Fluent.Options) do
+    Option:OnChanged(function() GlobalSave() end)
+end
+
+Window:SelectTab(LojaTab)
+Fluent:Notify({Title = "FOUR HUB v3", Content = "✅ Misc e Auto Execute restaurados!", Duration = 4})
