@@ -1869,7 +1869,7 @@ end
 -- ABA MISC (IGUAL À FOTO + AUTO EXECUTE COMPLETO)
 -- ==========================================================
 
-local scriptURL = "https://raw.githubusercontent.com/luuuuuuyyyyyyyy/Four-hubass/refs/heads/main/FourHub"
+local scriptURL = "https://raw.githubusercontent.com/H4CKERzinnn/Games/refs/heads/main/Arise%20Crossover"
 
 -- 1. NOTIFICAÇÕES (IGUAL À FOTO)
 local NotificationsGroup = MiscTab:AddSection("Avisos") -- Título curto para não poluir
