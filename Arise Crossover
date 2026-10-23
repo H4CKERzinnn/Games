@@ -743,6 +743,8 @@ function TeleportSystem:Initialize()
     local allEnemiesDead = false
     local isSystemActive = true
     local loopToken = {}
+    local nextRoomIndex = 1
+    local ROOM_SEARCH_WAIT = 0.45
 
     local function createMobileUI()
         local playerGui = player:WaitForChild("PlayerGui")
@@ -874,10 +876,93 @@ function TeleportSystem:Initialize()
         end
     end
 
+    -- Detecta o marcador usado pelo jogo quando o inimigo morre.
+    -- Em algumas versões ele aparece como atributo/BoolValue "Dead";
+    -- em outras, como um estado textual "Dead".
+    local function hasDeadMarker(object)
+        local candidates = {object}
+        local model = object:FindFirstAncestorOfClass("Model")
+        if model then table.insert(candidates, model) end
+
+        for _, candidate in ipairs(candidates) do
+            for _, markerName in ipairs({"Dead", "IsDead"}) do
+                local attributeValue = candidate:GetAttribute(markerName)
+                if attributeValue == true then return true end
+                if typeof(attributeValue) == "string" and string.lower(attributeValue) == "dead" then
+                    return true
+                end
+
+                local marker = candidate:FindFirstChild(markerName, true)
+                if marker then
+                    if marker:IsA("BoolValue") and marker.Value == true then
+                        return true
+                    end
+                    if marker:IsA("StringValue") and string.lower(marker.Value) == "dead" then
+                        return true
+                    end
+                end
+            end
+
+            for _, stateName in ipairs({"State", "Status", "LifeState"}) do
+                local state = candidate:GetAttribute(stateName)
+                if typeof(state) == "string" and string.lower(state) == "dead" then
+                    return true
+                end
+                local stateValue = candidate:FindFirstChild(stateName, true)
+                if stateValue and stateValue:IsA("StringValue") and string.lower(stateValue.Value) == "dead" then
+                    return true
+                end
+            end
+        end
+
+        return false
+    end
+
+    -- Retorna a vida quando o jogo replica essa informação no inimigo.
+    -- O segundo retorno informa se uma fonte de vida foi encontrada.
+    local function getEnemyHealth(object)
+        local candidates = {object}
+        local model = object:FindFirstAncestorOfClass("Model")
+        if model then table.insert(candidates, model) end
+
+        for _, candidate in ipairs(candidates) do
+            local humanoid = candidate:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                return humanoid.Health, true
+            end
+
+            for _, attributeName in ipairs({"Health", "HP", "CurrentHealth"}) do
+                local attributeValue = candidate:GetAttribute(attributeName)
+                if typeof(attributeValue) == "number" then
+                    return attributeValue, true
+                end
+            end
+
+            for _, valueName in ipairs({"Health", "HP", "CurrentHealth"}) do
+                local valueObject = candidate:FindFirstChild(valueName, true)
+                if valueObject and (valueObject:IsA("NumberValue") or valueObject:IsA("IntValue")) then
+                    return valueObject.Value, true
+                end
+            end
+        end
+
+        return nil, false
+    end
+
+    local function isEnemyAlive(part)
+        if hasDeadMarker(part) then
+            return false
+        end
+
+        local health, hasHealth = getEnemyHealth(part)
+        -- Se não houver Health replicado, mantém o comportamento anterior.
+        return not hasHealth or health > 0
+    end
+
     local function updatePartsCache()
         local validParts = {}
         for _, part in ipairs(serverFolder:GetChildren()) do
-            if part:IsA("BasePart") or part:IsA("MeshPart") then
+            if (part:IsA("BasePart") or part:IsA("MeshPart")) and isEnemyAlive(part) then
                 table.insert(validParts, part)
             end
         end
@@ -969,6 +1054,53 @@ function TeleportSystem:Initialize()
         return true
     end
 
+    -- Quando o jogador está longe, __Enemies.Server pode ficar vazio até
+    -- a sala ser carregada. Nesse caso, visita Room_1, Room_2, Room_3 e
+    -- Room_4 em ordem, esperando os inimigos aparecerem após cada TP.
+    local function getRoomPosition(room)
+        if not room then return nil end
+
+        if room:IsA("Model") then
+            local ok, pivot = pcall(function()
+                return room:GetPivot()
+            end)
+            if ok and pivot then
+                return pivot.Position
+            end
+        end
+
+        local part = room:IsA("BasePart") and room or room:FindFirstChildWhichIsA("BasePart", true)
+        return part and part.Position or nil
+    end
+
+    local function teleportToRoom(roomIndex)
+        local room = worldFolder:FindFirstChild("Room_" .. tostring(roomIndex))
+        local position = getRoomPosition(room)
+        if not position or not humanoidRootPart then return false end
+
+        humanoidRootPart.CFrame = CFrame.new(position + Vector3.new(0, 3, 0))
+        updateStatusLabel("Carregando Room_" .. tostring(roomIndex) .. "...")
+        return true
+    end
+
+    local function searchRoomsForEnemies()
+        for checked = 1, 4 do
+            local roomIndex = nextRoomIndex
+            nextRoomIndex = (nextRoomIndex % 4) + 1
+
+            if teleportToRoom(roomIndex) then
+                task.wait(ROOM_SEARCH_WAIT)
+                local parts = updatePartsCache()
+                if #parts > 0 then
+                    updateStatusLabel("Inimigos encontrados na Room_" .. tostring(roomIndex))
+                    return true
+                end
+            end
+        end
+
+        return false
+    end
+
     local function autoTeleportLoop()
         while self.Active and isSystemActive and loopToken do
             task.wait(0.5)
@@ -977,14 +1109,27 @@ function TeleportSystem:Initialize()
                 continue
             end
             if isTeleporting then continue end
-            if checkAllEnemiesDead() and not allEnemiesDead then
-                allEnemiesDead = true
-                updateStatusLabel("Procurando portal...")
-                task.wait(0.5)
-                if not teleportToPortal() then
-                    updateStatusLabel("Aguardando portal...")
+            local currentParts = updatePartsCache()
+
+            if #currentParts == 0 then
+                -- Primeiro tenta carregar as salas; só procura o portal
+                -- depois que Room_1..Room_4 não trouxerem inimigos.
+                if searchRoomsForEnemies() then
+                    allEnemiesDead = false
+                    continue
                 end
-            elseif not checkAllEnemiesDead() then
+
+                if not allEnemiesDead then
+                    allEnemiesDead = true
+                    updateStatusLabel("Procurando portal...")
+                    task.wait(0.5)
+                    if teleportToPortal() then
+                        nextRoomIndex = 1
+                    else
+                        updateStatusLabel("Aguardando portal...")
+                    end
+                end
+            else
                 allEnemiesDead = false
                 local nextPart = getNextPart()
                 if nextPart then
@@ -1566,6 +1711,22 @@ end})
 
 -- Note: Auto Reset Dungeon (moved into Dungeon tab) - using the logic from the new script
 local autoResetEnabled = false
+local DUNGEON_RESET_DELAY = 2
+
+local function GetDungeonEndsSignal()
+    local playerGui = Player:FindFirstChild("PlayerGui")
+    local hud = playerGui and playerGui:FindFirstChild("Hud")
+    local upContainer = hud and hud:FindFirstChild("UpContanier")
+    local dungeonInfo = upContainer and upContainer:FindFirstChild("DungeonInfo")
+    local textLabel = dungeonInfo and dungeonInfo:FindFirstChild("TextLabel")
+    local text = textLabel and tostring(textLabel.Text or "") or ""
+
+    -- Aceita mensagens como "Dungeon Ends in 54s" e "Dungeon Ends in: 54s".
+    local lowerText = string.lower(text)
+    local seconds = string.match(lowerText, "dungeon%s+ends%s+in%s*:%s*(%d+)%s*s")
+        or string.match(lowerText, "dungeon%s+ends%s+in%s*(%d+)%s*s")
+    return seconds and tonumber(seconds), text
+end
 
 AutoDungeonGroup:AddToggle("AutoDungeonReset", {
     Title = "Reset Dungeon",
@@ -1578,22 +1739,24 @@ AutoDungeonGroup:AddToggle("AutoDungeonReset", {
 
             task.spawn(function()
                 while autoResetEnabled do
-                    -- Wait for dungeon finish detection
-                    local dungeonFinished = false
+                    -- Assim que o HUD mostrar qualquer contagem (60s até 1s),
+                    -- começa uma espera fixa de 2 segundos. Não esperamos chegar a 1s.
+                    local countdownSeconds, countdownText
                     repeat
-                        task.wait(0.4)
-                        local mainFolder = workspace:FindFirstChild("__Main")
-                        if mainFolder then
-                            local dungeonFolder = mainFolder:FindFirstChild("__Dungeon")
-                            if dungeonFolder and dungeonFolder:FindFirstChild("Dungeon") then
-                                dungeonFinished = true
-                            end
-                        end
-                    until dungeonFinished or not autoResetEnabled
+                        task.wait(0.1)
+                        countdownSeconds, countdownText = GetDungeonEndsSignal()
+                    until countdownSeconds ~= nil or not autoResetEnabled
 
                     if not autoResetEnabled then break end
 
-                    Fluent:Notify({Title = "Auto Reset", Content = "Dungeon terminada! Resetando...", Duration = 5})
+                    Fluent:Notify({
+                        Title = "Auto Reset",
+                        Content = "Contagem detectada (" .. tostring(countdownSeconds) .. "s). Resetando em 2 segundos...",
+                        Duration = 4
+                    })
+
+                    task.wait(DUNGEON_RESET_DELAY)
+                    if not autoResetEnabled then break end
 
                     -- 1. Pagar ticket com Gems
                     Remote:FireServer({
@@ -1630,7 +1793,14 @@ AutoDungeonGroup:AddToggle("AutoDungeonReset", {
 
                     Fluent:Notify({Title = "Auto Reset", Content = "Nova dungeon iniciada! Farmando...", Duration = 4})
 
-                    task.wait(0.6)
+                    -- Aguarda o HUD mudar/remover a mensagem antiga para não
+                    -- disparar vários resets usando o mesmo texto.
+                    local waitStart = tick()
+                    repeat
+                        task.wait(0.2)
+                        local _, currentText = GetDungeonEndsSignal()
+                        if currentText ~= countdownText then break end
+                    until not autoResetEnabled or tick() - waitStart >= 8
                 end
             end)
         else
