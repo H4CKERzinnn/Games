@@ -326,7 +326,7 @@ local MountSystem = {
     LoopRunning = false,
     Hopping = false,
     LastHop = 0,
-    HoldDuration = 3,
+    HoldDuration = 0.05, -- bem mais baixo agora
     HopDelay = 10,
     HopCooldown = 8
 }
@@ -341,7 +341,6 @@ local function GetMountModels()
     local result = {}
     if not appearFolder then return result end
 
-    -- Bat5 é o próprio Model da montaria; ele fica diretamente dentro de __Appear.
     for _, object in ipairs(appearFolder:GetChildren()) do
         if object:IsA("Model") then
             table.insert(result, object)
@@ -371,19 +370,36 @@ local function MoveToMount(model)
     local position = GetModelPosition(model)
     if not root or not position then return false end
     root.CFrame = CFrame.new(position + Vector3.new(0, 3, 0))
-    task.wait(0.15)
+    task.wait(0.12)
     return true
 end
 
 local function ClaimMount(model)
     local prompt = FindMountPrompt(model)
-    if not prompt or (prompt.Enabled == false) then return false end
+    if not prompt or prompt.Enabled == false then return false end
     if not MoveToMount(model) then return false end
+
+    -- Pequeno delay aleatório pra ficar menos robótico
+    task.wait(math.random(4, 12) / 100)
+
+    -- Método 1: fireproximityprompt (mais recomendado / menos detectável)
+    if fireproximityprompt then
+        pcall(function()
+            local originalHold = prompt.HoldDuration
+            prompt.HoldDuration = 0
+            fireproximityprompt(prompt)
+            prompt.HoldDuration = originalHold
+        end)
+        return true
+    end
+
+    -- Método 2: fallback rápido
     pcall(function()
         prompt:InputHoldBegin()
-        task.wait(MountSystem.HoldDuration)
+        task.wait(0.05)
         prompt:InputHoldEnd()
     end)
+
     return true
 end
 
@@ -445,7 +461,7 @@ local function MoveToIsland(island)
     local position = GetModelPosition(island)
     if not root or not position then return false end
     root.CFrame = CFrame.new(position + Vector3.new(0, 3, 0))
-    task.wait(0.6)
+    task.wait(0.55)
     return true
 end
 
@@ -480,16 +496,17 @@ local function ScanAllWildIslands()
                 if MountSystem.AutoClaim then
                     for _, mount in ipairs(mounts) do
                         if not (MountSystem.AutoClaim or MountSystem.AutoHop) then break end
-                        if mount and mount.Parent then ClaimMount(mount) end
-                        task.wait(0.2)
+                        if mount and mount.Parent then
+                            ClaimMount(mount)
+                        end
+                        task.wait(0.15)
                     end
                 end
             end
         end
-        task.wait(0.2)
+        task.wait(0.18)
     end
 
-    -- Auto Hop off: return to the exact position from before the scan.
     if not MountSystem.AutoHop then
         RestoreStartCFrame(startCFrame)
     end
@@ -505,7 +522,6 @@ local function MountLoop()
             if stopped then break end
 
             if not foundMount and MountSystem.AutoHop then
-                -- Full scan finished: give the player 10 seconds to disable Auto Hop.
                 local shouldHop = true
                 for _ = 1, MountSystem.HopDelay do
                     if not MountSystem.AutoHop or #GetMountModels() > 0 then
@@ -520,7 +536,7 @@ local function MountLoop()
                     task.wait(MountSystem.HopCooldown)
                 end
             else
-                task.wait(0.5)
+                task.wait(0.45)
             end
         end
         MountSystem.LoopRunning = false
