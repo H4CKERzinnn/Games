@@ -317,7 +317,8 @@ local StormSystem = {
     Active = false,
     LoopRunning = false,
     AttackDelay = 0.25,
-    ScanDelay = 1
+    ScanDelay = 1,
+    ProcessedRadars = {}
 }
 
 local function GetChargedRadarBlocks()
@@ -419,22 +420,37 @@ local function StormLoop()
     task.spawn(function()
         while StormSystem.Active do
             local chargedRadars = GetChargedRadarBlocks()
+            local activeRadarBlocks = {}
+
             for _, radar in ipairs(chargedRadars) do
                 if not StormSystem.Active then break end
+                local block = radar.Block
+                activeRadarBlocks[block] = true
 
-                local radarPosition = GetRadarPosition(radar)
-                local character = Player.Character or Player.CharacterAdded:Wait()
-                local root = character and character:FindFirstChild("HumanoidRootPart")
-                if root and radarPosition then
-                    -- Teleport to the radar block/Adornee where ChargedIcon is visible.
-                    root.CFrame = CFrame.new(radarPosition + Vector3.new(0, 3, 0))
-                    task.wait(0.7)
+                -- Teleport only once while this ChargedIcon remains visible.
+                if not StormSystem.ProcessedRadars[block] then
+                    local radarPosition = GetRadarPosition(radar)
+                    local character = Player.Character or Player.CharacterAdded:Wait()
+                    local root = character and character:FindFirstChild("HumanoidRootPart")
+                    if root and radarPosition then
+                        root.CFrame = CFrame.new(radarPosition + Vector3.new(0, 3, 0))
+                        StormSystem.ProcessedRadars[block] = true
+                        task.wait(0.7)
+                    end
                 end
 
+                -- Stay near the island/NPCs after the first radar TP.
                 local npcs = GetStormNPCs(radar)
                 for _, npc in ipairs(npcs) do
                     if not StormSystem.Active then break end
                     AttackStormTarget(npc)
+                end
+            end
+
+            -- When an icon turns off, allow that radar to trigger again later.
+            for block in pairs(StormSystem.ProcessedRadars) do
+                if not activeRadarBlocks[block] then
+                    StormSystem.ProcessedRadars[block] = nil
                 end
             end
             task.wait(StormSystem.ScanDelay)
@@ -445,6 +461,9 @@ end
 
 MAIN_CALLBACKS.AutoStorm = function(value)
     StormSystem.Active = value == true
+    if not StormSystem.Active then
+        StormSystem.ProcessedRadars = {}
+    end
     StormLoop()
 end
 
