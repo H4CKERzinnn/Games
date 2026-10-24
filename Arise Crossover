@@ -144,12 +144,11 @@ local MAIN_CALLBACKS = {
     AutoSellWeapons = nil,
     UpgradeSword = nil,
     BuySword = nil,
-    AutoClaimMounts = nil,
-    AutoHopMounts = nil,
     TPWorld1 = nil,
     TPWorld2 = nil,
     TPWorld3 = nil,
-    AutoEnterTrial = nil
+    EnterTest = nil,
+    AutoStorm = nil
 }
 
 -- Place IDs
@@ -302,258 +301,152 @@ MainShopSection:AddToggle("MainBuySword", {
     end
 })
 
-local MainMountSection = MainTab:AddSection("Mounts")
+local MainStormSection = MainTab:AddSection("Storm")
 
-MainMountSection:AddToggle("MainAutoClaimMounts", {
-    Title = "Auto Claim Mounts",
+MainStormSection:AddToggle("MainAutoStorm", {
+    Title = "Auto Storm",
     Default = false,
-    Callback = function(value) RunMainCallback("AutoClaimMounts", value) end
-})
-
-MainMountSection:AddToggle("MainAutoHopMounts", {
-    Title = "Auto Hop Mounts",
-    Default = false,
-    Callback = function(value) RunMainCallback("AutoHopMounts", value) end
+    Callback = function(value) RunMainCallback("AutoStorm", value) end
 })
 
 -- =========================================================
--- MOUNT SYSTEM - workspace.__Extra.__Appear.Bat5
--- Finds mount Models, moves to them and holds their ProximityPrompt.
+-- AUTO STORM
+-- Checks ChargedIcon.Visible and farms Client NPC Models.
 -- =========================================================
-local MountSystem = {
-    AutoClaim = false,
-    AutoHop = false,
+local StormSystem = {
+    Active = false,
     LoopRunning = false,
-    Hopping = false,
-    LastHop = 0,
-    HoldDuration = 0.05, -- bem mais baixo agora
-    HopDelay = 10,
-    HopCooldown = 8
+    AttackDelay = 0.25,
+    ScanDelay = 1
 }
 
-local function GetMountFolder()
+local function GetChargedRadarBlocks()
     local extra = workspace:FindFirstChild("__Extra")
-    return extra and extra:FindFirstChild("__Appear")
+    local radars = extra and extra:FindFirstChild("Radars")
+    local charged = {}
+    if not radars then return charged end
+
+    -- Each child of Radars is an island radar block/part.
+    for _, radarBlock in ipairs(radars:GetChildren()) do
+        local billboard = radarBlock:FindFirstChild("BillboardGui", true)
+        local chargedIcon = billboard and billboard:FindFirstChild("ChargedIcon")
+        if chargedIcon and chargedIcon:IsA("GuiObject") and chargedIcon.Visible == true then
+            table.insert(charged, {
+                Block = radarBlock,
+                Billboard = billboard,
+                Icon = chargedIcon
+            })
+        end
+    end
+    return charged
 end
 
-local function GetMountModels()
-    local appearFolder = GetMountFolder()
-    local result = {}
-    if not appearFolder then return result end
+local function GetRadarPosition(radar)
+    if not radar then return nil end
 
-    for _, object in ipairs(appearFolder:GetChildren()) do
-        if object:IsA("Model") then
+    -- Prefer the BillboardGui Adornee, which is the actual icon anchor.
+    local adornee = radar.Billboard and radar.Billboard.Adornee
+    if adornee then
+        if adornee:IsA("BasePart") then return adornee.Position end
+        if adornee:IsA("Model") then
+            local ok, pivot = pcall(function() return adornee:GetPivot() end)
+            if ok and pivot then return pivot.Position end
+        end
+    end
+
+    local block = radar.Block
+    if block:IsA("BasePart") then return block.Position end
+    if block:IsA("Model") then
+        local ok, pivot = pcall(function() return block:GetPivot() end)
+        if ok and pivot then return pivot.Position end
+    end
+    local part = block:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.Position or nil
+end
+
+local function GetRadarName(radar)
+    return radar and radar.Block and radar.Block.Name or nil
+end
+
+local function GetStormNPCs(radar)
+    local main = workspace:FindFirstChild("__Main")
+    local enemies = main and main:FindFirstChild("__Enemies")
+    local client = enemies and enemies:FindFirstChild("Client")
+    local result, seen = {}, {}
+    if not client then return result end
+
+    -- If Client has an island folder matching the radar block, use it first.
+    local source = nil
+    local radarName = GetRadarName(radar)
+    if radarName then source = client:FindFirstChild(radarName) end
+    source = source or client
+
+    for _, object in ipairs(source:GetDescendants()) do
+        if object:IsA("Model") and not seen[object] and object:FindFirstChild("HumanoidRootPart") then
+            seen[object] = true
             table.insert(result, object)
         end
     end
     return result
 end
 
-local function GetModelPosition(model)
-    if not model or not model.Parent then return nil end
-    local ok, pivot = pcall(function() return model:GetPivot() end)
-    if ok and pivot then return pivot.Position end
-    local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
-    return part and part.Position or nil
-end
-
-local function FindMountPrompt(model)
-    if not model then return nil end
-    local prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true)
-    if prompt then return prompt end
-    return nil
-end
-
-local function MoveToMount(model)
+local function MoveToStormTarget(target)
     local character = Player.Character or Player.CharacterAdded:Wait()
     local root = character and character:FindFirstChild("HumanoidRootPart")
-    local position = GetModelPosition(model)
-    if not root or not position then return false end
-    root.CFrame = CFrame.new(position + Vector3.new(0, 3, 0))
-    task.wait(0.12)
+    local targetRoot = target and target:FindFirstChild("HumanoidRootPart")
+    if not root or not targetRoot then return false end
+    root.CFrame = CFrame.new(targetRoot.Position + Vector3.new(0, 3, 0))
     return true
 end
 
-local function ClaimMount(model)
-    local prompt = FindMountPrompt(model)
-    if not prompt or prompt.Enabled == false then return false end
-    if not MoveToMount(model) then return false end
+local function AttackStormTarget(target)
+    if not target or not target.Parent then return end
+    if not MoveToStormTarget(target) then return end
 
-    -- Pequeno delay aleatório pra ficar menos robótico
-    task.wait(math.random(4, 12) / 100)
-
-    -- Método 1: fireproximityprompt (mais recomendado / menos detectável)
-    if fireproximityprompt then
-        pcall(function()
-            local originalHold = prompt.HoldDuration
-            prompt.HoldDuration = 0
-            fireproximityprompt(prompt)
-            prompt.HoldDuration = originalHold
-        end)
-        return true
-    end
-
-    -- Método 2: fallback rápido
+    -- Uses the normal client click input; no unknown damage remote is invented.
     pcall(function()
-        prompt:InputHoldBegin()
-        task.wait(0.05)
-        prompt:InputHoldEnd()
+        VirtualUser:CaptureController()
+        VirtualUser:Button1Down(Vector2.new(0, 0))
+        task.wait(0.08)
+        VirtualUser:Button1Up(Vector2.new(0, 0))
     end)
-
-    return true
+    task.wait(StormSystem.AttackDelay)
 end
 
-local function HopToAnotherServer()
-    if MountSystem.Hopping then return end
-    if tick() - MountSystem.LastHop < MountSystem.HopCooldown then return end
-    MountSystem.Hopping = true
-    MountSystem.LastHop = tick()
-
+local function StormLoop()
+    if StormSystem.LoopRunning then return end
+    StormSystem.LoopRunning = true
     task.spawn(function()
-        local teleported = false
-        pcall(function()
-            local placeId = tostring(game.PlaceId)
-            local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?sortOrder=Asc&limit=100"
-            local response = game:HttpGet(url)
-            local data = HttpService:JSONDecode(response)
-            if data and data.data then
-                for _, server in ipairs(data.data) do
-                    if server.id ~= game.JobId and server.playing < server.maxPlayers then
-                        game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, server.id, Player)
-                        teleported = true
-                        break
-                    end
+        while StormSystem.Active do
+            local chargedRadars = GetChargedRadarBlocks()
+            for _, radar in ipairs(chargedRadars) do
+                if not StormSystem.Active then break end
+
+                local radarPosition = GetRadarPosition(radar)
+                local character = Player.Character or Player.CharacterAdded:Wait()
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+                if root and radarPosition then
+                    -- Teleport to the radar block/Adornee where ChargedIcon is visible.
+                    root.CFrame = CFrame.new(radarPosition + Vector3.new(0, 3, 0))
+                    task.wait(0.7)
+                end
+
+                local npcs = GetStormNPCs(radar)
+                for _, npc in ipairs(npcs) do
+                    if not StormSystem.Active then break end
+                    AttackStormTarget(npc)
                 end
             end
-        end)
-        if not teleported then
-            pcall(function()
-                game:GetService("TeleportService"):Teleport(game.PlaceId, Player)
-            end)
+            task.wait(StormSystem.ScanDelay)
         end
-        task.wait(2)
-        MountSystem.Hopping = false
+        StormSystem.LoopRunning = false
     end)
 end
 
-local function GetWildIslandModels()
-    local main = workspace:FindFirstChild("__Main")
-    local world = main and main:FindFirstChild("__World")
-    local wilds = world and world:FindFirstChild("Wilds")
-    local islands = {}
-    if not wilds then return islands end
-
-    for _, object in ipairs(wilds:GetChildren()) do
-        if object:IsA("Model") then
-            table.insert(islands, object)
-        end
-    end
-
-    table.sort(islands, function(a, b)
-        return a.Name < b.Name
-    end)
-    return islands
+MAIN_CALLBACKS.AutoStorm = function(value)
+    StormSystem.Active = value == true
+    StormLoop()
 end
-
-local function MoveToIsland(island)
-    local character = Player.Character or Player.CharacterAdded:Wait()
-    local root = character and character:FindFirstChild("HumanoidRootPart")
-    local position = GetModelPosition(island)
-    if not root or not position then return false end
-    root.CFrame = CFrame.new(position + Vector3.new(0, 3, 0))
-    task.wait(0.55)
-    return true
-end
-
-local function GetStartCFrame()
-    local character = Player.Character
-    local root = character and character:FindFirstChild("HumanoidRootPart")
-    return root and root.CFrame or nil
-end
-
-local function RestoreStartCFrame(startCFrame)
-    if not startCFrame then return end
-    local character = Player.Character or Player.CharacterAdded:Wait()
-    local root = character and character:FindFirstChild("HumanoidRootPart")
-    if root then root.CFrame = startCFrame end
-end
-
-local function ScanAllWildIslands()
-    local startCFrame = GetStartCFrame()
-    local foundMount = false
-    local islands = GetWildIslandModels()
-
-    for _, island in ipairs(islands) do
-        if not (MountSystem.AutoClaim or MountSystem.AutoHop) then
-            RestoreStartCFrame(startCFrame)
-            return true, true
-        end
-
-        if island and island.Parent and MoveToIsland(island) then
-            local mounts = GetMountModels()
-            if #mounts > 0 then
-                foundMount = true
-                if MountSystem.AutoClaim then
-                    for _, mount in ipairs(mounts) do
-                        if not (MountSystem.AutoClaim or MountSystem.AutoHop) then break end
-                        if mount and mount.Parent then
-                            ClaimMount(mount)
-                        end
-                        task.wait(0.15)
-                    end
-                end
-            end
-        end
-        task.wait(0.18)
-    end
-
-    if not MountSystem.AutoHop then
-        RestoreStartCFrame(startCFrame)
-    end
-    return foundMount, false
-end
-
-local function MountLoop()
-    if MountSystem.LoopRunning then return end
-    MountSystem.LoopRunning = true
-    task.spawn(function()
-        while MountSystem.AutoClaim or MountSystem.AutoHop do
-            local foundMount, stopped = ScanAllWildIslands()
-            if stopped then break end
-
-            if not foundMount and MountSystem.AutoHop then
-                local shouldHop = true
-                for _ = 1, MountSystem.HopDelay do
-                    if not MountSystem.AutoHop or #GetMountModels() > 0 then
-                        shouldHop = false
-                        break
-                    end
-                    task.wait(1)
-                end
-
-                if shouldHop and MountSystem.AutoHop and #GetMountModels() == 0 then
-                    HopToAnotherServer()
-                    task.wait(MountSystem.HopCooldown)
-                end
-            else
-                task.wait(0.45)
-            end
-        end
-        MountSystem.LoopRunning = false
-    end)
-end
-
-MAIN_CALLBACKS.AutoClaimMounts = function(value)
-    MountSystem.AutoClaim = value == true
-    MountLoop()
-end
-
-MAIN_CALLBACKS.AutoHopMounts = function(value)
-    MountSystem.AutoHop = value == true
-    MountLoop()
-end
-
-
 
 local MainTeleportSection = MainTab:AddSection("World Teleport")
 
@@ -582,8 +475,8 @@ MainTeleportSection:AddButton({
 })
 
 MainTeleportSection:AddButton({
-    Title = "Auto Enter Trial",
-    Callback = function() RunMainCallback("AutoEnterTrial") end
+    Title = "Enter Test",
+    Callback = function() RunMainCallback("EnterTest") end
 })
 
 -- Minimizer opcional: usa o recurso se a versão do Fluent carregada oferecer suporte.
