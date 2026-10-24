@@ -327,7 +327,7 @@ local MountSystem = {
     Hopping = false,
     LastHop = 0,
     HoldDuration = 3,
-    HopDelay = 10,
+    HopDelay = 60,
     HopCooldown = 8
 }
 
