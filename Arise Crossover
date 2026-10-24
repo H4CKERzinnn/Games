@@ -171,6 +171,146 @@ local function TeleportToMap(placeId)
     end)
 end
 
+-- =========================================================
+-- MOUNT SYSTEM - workspace.__Extra.__Appear.Bat5
+-- Finds mount Models, moves to them and holds their ProximityPrompt.
+-- =========================================================
+local MountSystem = {
+    AutoClaim = false,
+    AutoHop = false,
+    LoopRunning = false,
+    Hopping = false,
+    LastHop = 0,
+    HoldDuration = 3,
+    HopCooldown = 8
+}
+
+local function GetMountFolder()
+    local extra = workspace:FindFirstChild("__Extra")
+    return extra and extra:FindFirstChild("__Appear")
+end
+
+local function GetMountModels()
+    local appearFolder = GetMountFolder()
+    local result = {}
+    if not appearFolder then return result end
+
+    -- Bat5 é o próprio Model da montaria; ele fica diretamente dentro de __Appear.
+    for _, object in ipairs(appearFolder:GetChildren()) do
+        if object:IsA("Model") then
+            table.insert(result, object)
+        end
+    end
+    return result
+end
+
+local function GetModelPosition(model)
+    if not model or not model.Parent then return nil end
+    local ok, pivot = pcall(function() return model:GetPivot() end)
+    if ok and pivot then return pivot.Position end
+    local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.Position or nil
+end
+
+local function FindMountPrompt(model)
+    if not model then return nil end
+    local prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt then return prompt end
+    return nil
+end
+
+local function MoveToMount(model)
+    local character = Player.Character or Player.CharacterAdded:Wait()
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local position = GetModelPosition(model)
+    if not root or not position then return false end
+    root.CFrame = CFrame.new(position + Vector3.new(0, 3, 0))
+    task.wait(0.15)
+    return true
+end
+
+local function ClaimMount(model)
+    local prompt = FindMountPrompt(model)
+    if not prompt or (prompt.Enabled == false) then return false end
+    if not MoveToMount(model) then return false end
+    pcall(function()
+        prompt:InputHoldBegin()
+        task.wait(MountSystem.HoldDuration)
+        prompt:InputHoldEnd()
+    end)
+    return true
+end
+
+local function HopToAnotherServer()
+    if MountSystem.Hopping then return end
+    if tick() - MountSystem.LastHop < MountSystem.HopCooldown then return end
+    MountSystem.Hopping = true
+    MountSystem.LastHop = tick()
+
+    task.spawn(function()
+        local teleported = false
+        pcall(function()
+            local placeId = tostring(game.PlaceId)
+            local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?sortOrder=Asc&limit=100"
+            local response = game:HttpGet(url)
+            local data = HttpService:JSONDecode(response)
+            if data and data.data then
+                for _, server in ipairs(data.data) do
+                    if server.id ~= game.JobId and server.playing < server.maxPlayers then
+                        game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, server.id, Player)
+                        teleported = true
+                        break
+                    end
+                end
+            end
+        end)
+        if not teleported then
+            pcall(function()
+                game:GetService("TeleportService"):Teleport(game.PlaceId, Player)
+            end)
+        end
+        task.wait(2)
+        MountSystem.Hopping = false
+    end)
+end
+
+local function MountLoop()
+    if MountSystem.LoopRunning then return end
+    MountSystem.LoopRunning = true
+    task.spawn(function()
+        while MountSystem.AutoClaim or MountSystem.AutoHop do
+            local mounts = GetMountModels()
+            if #mounts > 0 then
+                if MountSystem.AutoClaim then
+                    for _, mount in ipairs(mounts) do
+                        if not (MountSystem.AutoClaim or MountSystem.AutoHop) then break end
+                        if mount and mount.Parent then ClaimMount(mount) end
+                        task.wait(0.2)
+                    end
+                else
+                    task.wait(0.5)
+                end
+            elseif MountSystem.AutoHop then
+                HopToAnotherServer()
+                task.wait(MountSystem.HopCooldown)
+            else
+                task.wait(0.5)
+            end
+        end
+        MountSystem.LoopRunning = false
+    end)
+end
+
+MAIN_CALLBACKS.AutoClaimMounts = function(value)
+    MountSystem.AutoClaim = value == true
+    MountLoop()
+end
+
+MAIN_CALLBACKS.AutoHopMounts = function(value)
+    MountSystem.AutoHop = value == true
+    MountLoop()
+end
+
 local function RunMainCallback(name, ...)
     local callback = MAIN_CALLBACKS[name]
     if type(callback) == "function" then
