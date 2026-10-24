@@ -4,7 +4,7 @@
 --   2. Janela e abas
 --   3. Funções compartilhadas e estados
 --   4. Sistemas principais
---   5. Abas: Infinite, Gachas, Upgrades, Loja, Dungeon, Teleport e Misc
+--   5. Abas: Infinite, Gachas, Upgrades, Shop, Dungeon, Teleport e Misc
 --   6. Loops globais e persistência
 --
 -- Nota: a correção de inicialização tenta descarregar uma janela Fluent
@@ -68,7 +68,7 @@ end)
 
 local Window = Fluent:CreateWindow({
     Title = "FOUR HUB",
-    SubTitle = "v4.0 - Reorganizado",
+    SubTitle = "v4.0 - Organized",
     Search = true,
     TabWidth = 160,
     Size = UDim2.fromOffset(600, 500),
@@ -83,13 +83,16 @@ if not Window then
 end
 
 local Tabs = {
+    -- Main reúne os controles de farm/teleporte solicitados.
+    Main = Window:AddTab({Title = "Main", Icon = "home"}),
+
     -- Gamemode reúne Infinite e Dungeon na mesma aba.
     Gamemode = Window:AddTab({Title = "Gamemode", Icon = "swords"}),
 
     -- Gacha & Upgrades reúne os sistemas de rolagem e melhoria.
     GachaUpgrades = Window:AddTab({Title = "Gacha & Upgrades", Icon = "arrow-up"}),
 
-    Loja = Window:AddTab({Title = "Loja", Icon = "shopping-cart"}),
+    Shop = Window:AddTab({Title = "Shop", Icon = "shopping-cart"}),
     Teleport = Window:AddTab({Title = "Teleport", Icon = "map"}),
     Misc = Window:AddTab({Title = "Misc", Icon = "settings"})
 }
@@ -97,13 +100,252 @@ local Tabs = {
 local Options = Fluent.Options
 
 -- Aliases: os sistemas antigos passam a usar as abas unificadas.
+local MainTab = Tabs.Main
 local InfiniteTab = Tabs.Gamemode
 local DungeonTab = Tabs.Gamemode
 local GachaTab = Tabs.GachaUpgrades
 local UpgradeTab = Tabs.GachaUpgrades
-local LojaTab = Tabs.Loja
+local ShopTab = Tabs.Shop
 local TeleportTab = Tabs.Teleport
 local MiscTab = Tabs.Misc
+
+-- =========================================================
+-- ABA MAIN - INTERFACE / PONTOS DE INTEGRAÇÃO
+-- Esta aba não dispara remotes nem contém lógica de jogo.
+-- Preencha os arrays abaixo com os nomes reais do seu jogo.
+-- Depois, coloque os callbacks na seção MAIN_CALLBACKS.
+-- =========================================================
+
+local MAIN_WORLD_LIST = {"World 1", "World 2", "World 3"} -- TODO: ilhas/mundos reais
+local MAIN_MOB_LIST = {"Todos os mobs"} -- TODO: nomes reais dos mobs
+local MAIN_FARM_METHODS = {"TP", "Tween", "TP + Tween"}
+local MAIN_RARITIES = {"Common", "Rare", "Epic", "Legendary", "Mythic", "Secret"}
+local MAIN_SWORD_LIST = {"Todas as espadas compráveis"} -- TODO: liste todas as espadas reais
+
+-- =========================================================
+-- ÁREA PARA COLAR OS CÓDIGOS DAS FUNÇÕES
+-- Exemplo:
+-- MAIN_CALLBACKS.AutoClick = function(value)
+--     -- cole aqui o código do Auto Click
+-- end
+-- Os callbacks abaixo são opcionais e permanecem vazios por padrão.
+-- =========================================================
+local MAIN_CALLBACKS = {
+    TPDelay = nil,
+    TweenDelay = nil,
+    SelectWorld = nil,
+    SelectMob = nil,
+    SelectFarmMethod = nil,
+    AutoFarmSelectedMob = nil,
+    AutoClick = nil,
+    AutoEquipBestShadows = nil,
+    AutoCollectQuests = nil,
+    AutoSellShadows = nil,
+    AutoSellWeapons = nil,
+    UpgradeSword = nil,
+    BuySword = nil,
+    AutoClaimMounts = nil,
+    AutoHopMounts = nil,
+    TPWorld1 = nil,
+    TPWorld2 = nil,
+    TPWorld3 = nil,
+    AutoEnterTrial = nil
+}
+
+-- Place IDs
+local MAP_PLACE_IDS = {
+    World1 = 87039211657390,
+    World2 = 75812907038499,
+    World3 = 131604490933694
+}
+local GAMEMODE_PLACE_ID = 128336380114944
+
+local function IsInGamemodePlace()
+    return game.PlaceId == GAMEMODE_PLACE_ID
+end
+
+local function TeleportToMap(placeId)
+    if not placeId then return end
+    pcall(function()
+        game:GetService("TeleportService"):Teleport(placeId, Player)
+    end)
+end
+
+local function RunMainCallback(name, ...)
+    local callback = MAIN_CALLBACKS[name]
+    if type(callback) == "function" then
+        local ok, err = pcall(callback, ...)
+        if not ok then warn("[FOUR HUB][Main][" .. name .. "] " .. tostring(err)) end
+    end
+end
+
+local MainFarmSection = MainTab:AddSection("Main Farm")
+
+MainFarmSection:AddSlider("MainTPDelay", {
+    Title = "TP Delay",
+    Min = 0,
+    Max = 20,
+    Default = 0,
+    Rounding = 1,
+    Callback = function(value) RunMainCallback("TPDelay", value) end
+})
+
+MainFarmSection:AddSlider("MainTweenDelay", {
+    Title = "Tween Delay",
+    Min = 0,
+    Max = 20,
+    Default = 0,
+    Rounding = 1,
+    Callback = function(value) RunMainCallback("TweenDelay", value) end
+})
+
+MainFarmSection:AddDropdown("MainSelectWorld", {
+    Title = "Select World",
+    Values = MAIN_WORLD_LIST,
+    Multi = false,
+    Default = 1,
+    Callback = function(value) RunMainCallback("SelectWorld", value) end
+})
+
+MainFarmSection:AddDropdown("MainSelectMob", {
+    Title = "Select Mob",
+    Values = MAIN_MOB_LIST,
+    Multi = false,
+    Default = 1,
+    Callback = function(value) RunMainCallback("SelectMob", value) end
+})
+
+MainFarmSection:AddDropdown("MainFarmMethod", {
+    Title = "Select Farm Method + TP",
+    Values = MAIN_FARM_METHODS,
+    Multi = false,
+    Default = 1,
+    Callback = function(value) RunMainCallback("SelectFarmMethod", value) end
+})
+
+MainFarmSection:AddToggle("MainAutoFarmSelectedMob", {
+    Title = "Auto Farm Selected Mob",
+    Default = false,
+    Callback = function(value) RunMainCallback("AutoFarmSelectedMob", value) end
+})
+
+MainFarmSection:AddToggle("MainAutoClick", {
+    Title = "Auto Click",
+    Default = false,
+    Callback = function(value) RunMainCallback("AutoClick", value) end
+})
+
+MainFarmSection:AddToggle("MainAutoEquipBestShadows", {
+    Title = "Auto Equip Best Shadows",
+    Default = false,
+    Callback = function(value) RunMainCallback("AutoEquipBestShadows", value) end
+})
+
+MainFarmSection:AddToggle("MainAutoCollectQuests", {
+    Title = "Auto Collect Quests",
+    Default = false,
+    Callback = function(value) RunMainCallback("AutoCollectQuests", value) end
+})
+
+local MainSellSection = MainTab:AddSection("Auto Sell")
+
+MainSellSection:AddDropdown("MainSellShadowRarity", {
+    Title = "Shadow Sell Rarity",
+    Values = MAIN_RARITIES,
+    Multi = false,
+    Default = 1
+})
+
+MainSellSection:AddToggle("MainAutoSellShadows", {
+    Title = "Auto Sell Shadows",
+    Default = false,
+    Callback = function(value)
+        RunMainCallback("AutoSellShadows", value, Fluent.Options.MainSellShadowRarity.Value)
+    end
+})
+
+MainSellSection:AddDropdown("MainSellWeaponRarity", {
+    Title = "Weapon Sell Rarity",
+    Values = MAIN_RARITIES,
+    Multi = false,
+    Default = 1
+})
+
+MainSellSection:AddToggle("MainAutoSellWeapons", {
+    Title = "Auto Sell Weapons",
+    Default = false,
+    Callback = function(value)
+        RunMainCallback("AutoSellWeapons", value, Fluent.Options.MainSellWeaponRarity.Value)
+    end
+})
+
+local MainShopSection = MainTab:AddSection("Swords")
+
+MainShopSection:AddToggle("MainUpgradeSword", {
+    Title = "Upgrade Sword",
+    Default = false,
+    Callback = function(value) RunMainCallback("UpgradeSword", value) end
+})
+
+MainShopSection:AddDropdown("MainBuySwordName", {
+    Title = "Buy Sword - Select Sword",
+    Values = MAIN_SWORD_LIST,
+    Multi = false,
+    Default = 1
+})
+
+MainShopSection:AddToggle("MainBuySword", {
+    Title = "Buy Sword",
+    Default = false,
+    Callback = function(value)
+        RunMainCallback("BuySword", value, Fluent.Options.MainBuySwordName.Value)
+    end
+})
+
+local MainMountSection = MainTab:AddSection("Mounts")
+
+MainMountSection:AddToggle("MainAutoClaimMounts", {
+    Title = "Auto Claim Mounts",
+    Default = false,
+    Callback = function(value) RunMainCallback("AutoClaimMounts", value) end
+})
+
+MainMountSection:AddToggle("MainAutoHopMounts", {
+    Title = "Auto Hop Mounts",
+    Default = false,
+    Callback = function(value) RunMainCallback("AutoHopMounts", value) end
+})
+
+local MainTeleportSection = MainTab:AddSection("World Teleport")
+
+MainTeleportSection:AddButton({
+    Title = "TP World 1",
+    Callback = function()
+        TeleportToMap(MAP_PLACE_IDS.World1)
+        RunMainCallback("TPWorld1")
+    end
+})
+
+MainTeleportSection:AddButton({
+    Title = "TP World 2",
+    Callback = function()
+        TeleportToMap(MAP_PLACE_IDS.World2)
+        RunMainCallback("TPWorld2")
+    end
+})
+
+MainTeleportSection:AddButton({
+    Title = "TP World 3",
+    Callback = function()
+        TeleportToMap(MAP_PLACE_IDS.World3)
+        RunMainCallback("TPWorld3")
+    end
+})
+
+MainTeleportSection:AddButton({
+    Title = "Auto Enter Trial",
+    Callback = function() RunMainCallback("AutoEnterTrial") end
+})
 
 -- Minimizer opcional: usa o recurso se a versão do Fluent carregada oferecer suporte.
 local Minimizer = nil
@@ -553,14 +795,14 @@ function AutoDungeonSmart:Start()
     if self.Active then return end
     self.Active = true
     self.Loop = task.spawn(SmartDungeonLoop)
-    Fluent:Notify({Title = "Auto Dungeon", Content = "✅ Ativado!", Duration = 3})
+    Fluent:Notify({Title = "Auto Dungeon", Content = "✅ Enabled!", Duration = 3})
 end
 
 function AutoDungeonSmart:Stop()
     if not self.Active then return end
     self.Active = false
     if self.Loop then task.cancel(self.Loop) end
-    Fluent:Notify({Title = "Auto Dungeon", Content = "❌ Desativado!", Duration = 3})
+    Fluent:Notify({Title = "Auto Dungeon", Content = "❌ Disabled!", Duration = 3})
 end
 
 -- ===========================
@@ -704,7 +946,7 @@ function AutoFarmSystem:Stop()
     if not self.Active then return end
     self.Active = false
     if self.MainLoop then task.cancel(self.MainLoop) end
-    Fluent:Notify({Title = "Auto Farm", Content = "❌ Desativado!", Duration = 3})
+    Fluent:Notify({Title = "Auto Farm", Content = "❌ Disabled!", Duration = 3})
 end
 
 -- ===========================
@@ -723,7 +965,7 @@ function TeleportSystem:Stop()
         pcall(function() self.UI.Button.Parent:Destroy() end)
     end
     self.UI = nil
-    Fluent:Notify({Title = "Auto Dungeon/INF", Content = "❌ Desativado!", Duration = 3})
+    Fluent:Notify({Title = "Auto Dungeon/INF", Content = "❌ Disabled!", Duration = 3})
 end
 
 function TeleportSystem:Initialize()
@@ -1204,66 +1446,62 @@ end
 -- Variáveis, helpers e controles da aba Infinite.
 -- =========================================================
 
--- === INFINITE / MAP (Castelo/Deserto/Boss) ===
+-- === INFINITE / MAP (Castelo/Desert/Boss) ===
 -- Use checkpoint lists from original/new
 local checkpointsCastelo = {30,60,90,120,150,180,210,240,270,300,330,360,390,420,450}
-local checkpointsDeserto = {30,60,90,120,150,180,210,240,270,300,330,360,390,420,450,480,510,540,570,600,630,660,690}
-local bossList = { "Easy", "Normal", "Hard", "Insane", "Ultra", "Caótico", "Nightmare" }
+local checkpointsDesert = {30,60,90,120,150,180,210,240,270,300,330,360,390,420,450,480,510,540,570,600,630,660,690}
+local bossList = { "Easy", "Normal", "Hard", "Insane", "Ultra", "Chaotic", "Nightmare" }
 
 -- Castelo Section
-local TabCasteloSection = InfiniteTab:AddSection("Castelo Infinito🏰")
-local CasteloCheckpointValue = "30"
-local CasteloCheckpointInput = TabCasteloSection:AddInput("CasteloCheckpointInput", {
-    Title = "Digite o Checkpoint",
-    Description = "Informe qualquer número de checkpoint.",
+local TabInfiniteCastleSection = InfiniteTab:AddSection("Infinite Castle🏰")
+local InfiniteCastleCheckpointValue = "30"
+local InfiniteCastleCheckpointInput = TabInfiniteCastleSection:AddInput("InfiniteCastleCheckpointInput", {
+    Title = "Enter Checkpoint",
     Default = "30",
     Placeholder = "Ex: 30, 600, 999",
     NumericOnly = true,
     Finished = false,
     Callback = function(value)
-        CasteloCheckpointValue = tostring(value or "")
+        InfiniteCastleCheckpointValue = tostring(value or "")
     end
 })
-TabCasteloSection:AddButton({
-    Title = "Criar sala + Iniciar 🏰",
-    Callback = function()
-        local value = tonumber(CasteloCheckpointValue)
+TabInfiniteCastleSection:AddToggle("StartInfiniteCastle", {
+    Title = "Create & Start Infinite Castle 🏰",
+    Default = false,
+    Callback = function(enabled)
+        if not enabled or IsInGamemodePlace() then return end
+        local value = tonumber(InfiniteCastleCheckpointValue)
         if value and value >= 0 then
             CreateRoom("InfiniteCastleAction")
             task.wait(0.3)
             StartRun("InfiniteCastleAction", value)
-            Fluent:Notify({Title = "Infinite", Content = "✅ Castelo: sala criada e iniciada ("..tostring(value).."s)", Duration = 3})
-        else
-            Fluent:Notify({Title = "Infinite", Content = "❌ Selecione um checkpoint!", Duration = 2})
         end
     end
 })
 
--- Deserto Section
-local TabDesertoSection = InfiniteTab:AddSection("Deserto 🏜️")
-local DesertoCheckpointValue = "30"
-local DesertoCheckpointInput = TabDesertoSection:AddInput("DesertoCheckpointInput", {
-    Title = "Digite o Checkpoint",
-    Description = "Informe qualquer número de checkpoint.",
+-- Desert Section
+local TabDesertSection = InfiniteTab:AddSection("Desert 🏜️")
+local DesertCheckpointValue = "30"
+local DesertCheckpointInput = TabDesertSection:AddInput("DesertCheckpointInput", {
+    Title = "Enter Checkpoint",
     Default = "30",
     Placeholder = "Ex: 30, 600, 999",
     NumericOnly = true,
     Finished = false,
     Callback = function(value)
-        DesertoCheckpointValue = tostring(value or "")
+        DesertCheckpointValue = tostring(value or "")
     end
 })
-TabDesertoSection:AddButton({
-    Title = "Criar sala + Iniciar 🏜️",
-    Callback = function()
-        local value = tonumber(DesertoCheckpointValue)
+TabDesertSection:AddToggle("StartDesert", {
+    Title = "Create & Start Desert 🏜️",
+    Default = false,
+    Callback = function(enabled)
+        if not enabled or IsInGamemodePlace() then return end
+        local value = tonumber(DesertCheckpointValue)
         if value and value >= 0 then
             CreateRoom("InfiniteModeAction")
             task.wait(0.3)
             StartRun("InfiniteModeAction", value)
-            Fluent:Notify({Title = "Infinite", Content = "✅ Deserto: sala criada e iniciada ("..tostring(value).."s)", Duration = 3})
-        else
-            Fluent:Notify({Title = "Infinite", Content = "❌ Selecione um checkpoint!", Duration = 2})
         end
     end
 })
@@ -1272,35 +1510,22 @@ TabDesertoSection:AddButton({
 local TabBossRushSection = InfiniteTab:AddSection("BossRush 💀")
 
 local BossRushDropdown = TabBossRushSection:AddDropdown("BossRushDifficulty", {
-    Title = "Selecionar dificuldade",
+    Title = "Select Difficulty",
     Values = bossList,
     Multi = false,
     Default = 1
 })
 
-TabBossRushSection:AddButton({
-    Title = "Criar sala + Iniciar BossRush 💀",
-    Callback = function()
+TabBossRushSection:AddToggle("StartBossRush", {
+    Title = "Create & Start BossRush 💀",
+    Default = false,
+    Callback = function(enabled)
+        if not enabled or IsInGamemodePlace() then return end
         local difficulty = BossRushDropdown.Value
-
-        if not difficulty or difficulty == "" then
-            Fluent:Notify({
-                Title = "BossRush",
-                Content = "❌ Selecione uma dificuldade primeiro!",
-                Duration = 3
-            })
-            return
-        end
-
+        if not difficulty or difficulty == "" then return end
         CreateBoss()
         task.wait(0.3)
         StartBoss(difficulty)
-
-        Fluent:Notify({
-            Title = "BossRush",
-            Content = "✅ Sala criada e BossRush iniciado: " .. tostring(difficulty),
-            Duration = 4
-        })
     end
 })
 
@@ -1344,7 +1569,7 @@ local selectedGacha = nil
 local autoRollRunning = false
 
 GachaGroup:AddDropdown("GachaSelect", {
-    Title = "Selecionar Gacha",
+    Title = "Select Gacha",
     Values = gachaList,
     Default = nil,
     Callback = function(value)
@@ -1354,12 +1579,12 @@ GachaGroup:AddDropdown("GachaSelect", {
 })
 
 GachaGroup:AddToggle("AutoGachaToggle", {
-    Title = "Auto Roll Ativado",
+    Title = "Auto Roll Enabled",
     Default = false,
     Callback = function(state)
         if state then
             if not selectedGacha then
-                Fluent:Notify({Title = "Erro", Content = "Selecione uma gacha primeiro!", Duration = 5})
+                Fluent:Notify({Title = "Error", Content = "Selecione uma gacha primeiro!", Duration = 5})
                 Fluent.Toggles.AutoGachaToggle:SetValue(false)
                 return
             end
@@ -1415,7 +1640,7 @@ GachaGroup:AddToggle("AutoGachaToggle", {
             end)
         else
             autoRollRunning = false
-            Fluent:Notify({Title = "Auto Gacha", Content = "Desativado", Duration = 3})
+            Fluent:Notify({Title = "Auto Gacha", Content = "Disabled", Duration = 3})
         end
     end
 })
@@ -1448,7 +1673,7 @@ local selectedType = nil
 local autoUpgraderRunning = false
 
 UpgraderSection:AddDropdown("UpgraderSelect", {
-    Title = "Selecionar Upgrader",
+    Title = "Select Upgrader",
     Values = upgraderList,
     Default = nil,
     Callback = function(value)
@@ -1458,7 +1683,7 @@ UpgraderSection:AddDropdown("UpgraderSelect", {
 })
 
 UpgraderSection:AddDropdown("TypeSelect", {
-    Title = "Tipo de Upgrade",
+    Title = "Upgrade Type",
     Values = typeList,
     Default = nil,
     Callback = function(value)
@@ -1468,12 +1693,12 @@ UpgraderSection:AddDropdown("TypeSelect", {
 })
 
 UpgraderSection:AddToggle("AutoUpgraderToggle", {
-    Title = "Auto Upgrade Ativado",
+    Title = "Auto Upgrade Enabled",
     Default = false,
     Callback = function(state)
         if state then
             if not selectedUpgrader or not selectedType then
-                Fluent:Notify({Title = "Erro", Content = "Selecione o Upgrader e o Tipo primeiro!", Duration = 5})
+                Fluent:Notify({Title = "Error", Content = "Selecione o Upgrader e o Tipo primeiro!", Duration = 5})
                 Fluent.Toggles.AutoUpgraderToggle:SetValue(false)
                 return
             end
@@ -1499,7 +1724,7 @@ UpgraderSection:AddToggle("AutoUpgraderToggle", {
             end)
         else
             autoUpgraderRunning = false
-            Fluent:Notify({Title = "Auto Upgrader", Content = "Desativado", Duration = 3})
+            Fluent:Notify({Title = "Auto Upgrader", Content = "Disabled", Duration = 3})
         end
     end
 })
@@ -1511,7 +1736,7 @@ local selectedUpgrade = nil
 local autoUpgradeRunning = false
 
 UpgradeBagSection:AddDropdown("UpgradeDropdown", {
-    Title = "Selecionar Upgrade",
+    Title = "Select Upgrade",
     Values = upgradeItens,
     Default = nil,
     Callback = function(value)
@@ -1521,17 +1746,17 @@ UpgradeBagSection:AddDropdown("UpgradeDropdown", {
 })
 
 UpgradeBagSection:AddToggle("AutoUpgradeToggle", {
-    Title = "Auto Upgrade Ativado",
+    Title = "Auto Upgrade Enabled",
     Default = false,
     Callback = function(state)
         if state then
             if not selectedUpgrade then
-                Fluent:Notify({Title = "Erro", Content = "Selecione um upgrade primeiro!", Duration = 4})
+                Fluent:Notify({Title = "Error", Content = "Selecione um upgrade primeiro!", Duration = 4})
                 Fluent.Toggles.AutoUpgradeToggle:SetValue(false)
                 return
             end
             autoUpgradeRunning = true
-            Fluent:Notify({Title = "Auto Upgrade", Content = "Comprando " .. selectedUpgrade .. " automaticamente!", Duration = 4})
+            Fluent:Notify({Title = "Auto Upgrade", Content = "Comprando " .. selectedUpgrade .. " automatically!", Duration = 4})
             task.spawn(function()
                 while autoUpgradeRunning do
                     local args = {
@@ -1551,18 +1776,18 @@ UpgradeBagSection:AddToggle("AutoUpgradeToggle", {
             end)
         else
             autoUpgradeRunning = false
-            Fluent:Notify({Title = "Auto Upgrade", Content = "Desativado", Duration = 3})
+            Fluent:Notify({Title = "Auto Upgrade", Content = "Disabled", Duration = 3})
         end
     end
 })
 
 -- =========================================================
 -- ABA 4: LOJA
--- Compras automáticas e compra de Mística.
+-- Compras automáticas e compra de Mythic.
 -- =========================================================
 
 -- LOJA
-local ShopSection = LojaTab:AddSection("Auto Comprar Item da Loja")
+local ShopSection = ShopTab:AddSection("Auto Buy Shop Item")
 local lojaItens = {
     "Rank Up Rune",
     "Double Dungeon Rune",
@@ -1583,28 +1808,28 @@ local selectedItem = nil
 local autoBuyRunning = false
 
 ShopSection:AddDropdown("ShopItemDropdown", {
-    Title = "Selecionar Item",
+    Title = "Select Item",
     Values = lojaItens,
     Default = nil,
     Search = true,
     Callback = function(value)
         selectedItem = value
-        Fluent:Notify({Title = "Loja", Content = "Item selecionado: " .. tostring(value), Duration = 3})
+        Fluent:Notify({Title = "Shop", Content = "Item selecionado: " .. tostring(value), Duration = 3})
     end
 })
 
 ShopSection:AddToggle("AutoBuyToggle", {
-    Title = "Auto Buy (Item Selecionado)",
+    Title = "Auto Buy (Selected Item)",
     Default = false,
     Callback = function(state)
         if state then
             if not selectedItem then
-                Fluent:Notify({Title = "Erro", Content = "Selecione um item primeiro!", Duration = 4})
+                Fluent:Notify({Title = "Error", Content = "Selecione um item primeiro!", Duration = 4})
                 Fluent.Toggles.AutoBuyToggle:SetValue(false)
                 return
             end
             autoBuyRunning = true
-            Fluent:Notify({Title = "Auto Buy", Content = "Comprando " .. selectedItem .. " automaticamente!", Duration = 4})
+            Fluent:Notify({Title = "Auto Buy", Content = "Comprando " .. selectedItem .. " automatically!", Duration = 4})
             task.spawn(function()
                 while autoBuyRunning do
                     local config = itemConfig[selectedItem]
@@ -1629,23 +1854,23 @@ ShopSection:AddToggle("AutoBuyToggle", {
             end)
         else
             autoBuyRunning = false
-            Fluent:Notify({Title = "Auto Buy", Content = "Desativado", Duration = 3})
+            Fluent:Notify({Title = "Auto Buy", Content = "Disabled", Duration = 3})
         end
     end
 })
 
 -- Adicionar um novo Section (opcional, para separar visualmente)
-local MysticaSection = LojaTab:AddSection("Auto Comprar Mística")
+local MysticaSection = ShopTab:AddSection("Auto Buy Mythic")
 
 local autoMysticaRunning = false
 
 MysticaSection:AddToggle("AutoMysticaToggle", {
-    Title = "Auto Comprar Mística (x500)",
+    Title = "Auto Buy Mythic (x500)",
     Default = false,
     Callback = function(state)
         if state then
             autoMysticaRunning = true
-            Fluent:Notify({Title = "Auto Mística", Content = "Comprando EnchMythical x500 automaticamente!", Duration = 5})
+            Fluent:Notify({Title = "Auto Mythic", Content = "Comprando EnchMythical x500 automatically!", Duration = 5})
 
             task.spawn(function()
                 while autoMysticaRunning do
@@ -1668,7 +1893,7 @@ MysticaSection:AddToggle("AutoMysticaToggle", {
             end)
         else
             autoMysticaRunning = false
-            Fluent:Notify({Title = "Auto Mística", Content = "Desativado", Duration = 3})
+            Fluent:Notify({Title = "Auto Mythic", Content = "Disabled", Duration = 3})
         end
     end
 })
@@ -1680,18 +1905,16 @@ MysticaSection:AddToggle("AutoMysticaToggle", {
 
 -- DUNGEON
 local DungeonGroup = DungeonTab:AddSection("Dungeon Options")
-DungeonGroup:AddButton({Title = "Criar Dungeon", Callback = function()
-    CreateDungeon()
-    Fluent:Notify({Title = "Dungeon", Content = "✅ Criada!", Duration = 3})
+DungeonGroup:AddToggle("CreateDungeon", {Title = "Create Dungeon", Default = false, Callback = function(enabled)
+    if enabled and not IsInGamemodePlace() then CreateDungeon() end
 end})
-DungeonGroup:AddButton({Title = "Iniciar Dungeon", Callback = function()
-    StartDungeon()
-    Fluent:Notify({Title = "Dungeon", Content = "✅ Iniciada!", Duration = 3})
+DungeonGroup:AddToggle("StartDungeon", {Title = "Start Dungeon", Default = false, Callback = function(enabled)
+    if enabled and not IsInGamemodePlace() then StartDungeon() end
 end})
 
 -- Auto Dungeon Smart toggle (kept)
 local AutoDungeonGroup = DungeonTab:AddSection("Auto Dungeon")
-AutoDungeonGroup:AddToggle("AutoDungeonSmart", {Title = "Auto Dungeon Inteligente", Default = false, Callback = function(v)
+AutoDungeonGroup:AddToggle("AutoDungeonSmart", {Title = "Smart Auto Dungeon", Default = false, Callback = function(v)
     Toggles.AutoDungeonSmart = v
     if v then AutoDungeonSmart:Start() else AutoDungeonSmart:Stop() end
 end})
@@ -1704,7 +1927,7 @@ end})
 
 -- Auto Farm Complete (kept)
 local AutoFarmGroup = DungeonTab:AddSection("Auto Farm")
-AutoFarmGroup:AddToggle("AutoFarmCompleto", {Title = "Auto Farm Completo", Default = false, Callback = function(v)
+AutoFarmGroup:AddToggle("AutoFarmCompleto", {Title = "Complete Auto Farm", Default = false, Callback = function(v)
     Toggles.AutoFarmCompleto = v
     if v then AutoFarmSystem:Start() else AutoFarmSystem:Stop() end
 end})
@@ -1735,7 +1958,7 @@ AutoDungeonGroup:AddToggle("AutoDungeonReset", {
         autoResetEnabled = state
 
         if state then
-            Fluent:Notify({Title = "Auto Dungeon Reset", Content = "Ativado! Esperando término da dungeon...", Duration = 6})
+            Fluent:Notify({Title = "Auto Dungeon Reset", Content = "Enabled! Esperando término da dungeon...", Duration = 6})
 
             task.spawn(function()
                 while autoResetEnabled do
@@ -1770,7 +1993,7 @@ AutoDungeonGroup:AddToggle("AutoDungeonReset", {
 
                     task.wait(0.4)
 
-                    -- 2. Criar sala
+                    -- 2. Create sala
                     Remote:FireServer({
                         {
                             Event = "DungeonAction",
@@ -1781,7 +2004,7 @@ AutoDungeonGroup:AddToggle("AutoDungeonReset", {
 
                     task.wait(0.5)
 
-                    -- 3. Iniciar dungeon
+                    -- 3. Start dungeon
                     Remote:FireServer({
                         {
                             Dungeon = 4286839868,
@@ -1804,7 +2027,7 @@ AutoDungeonGroup:AddToggle("AutoDungeonReset", {
                 end
             end)
         else
-            Fluent:Notify({Title = "Auto Dungeon Reset", Content = "Desativado", Duration = 4})
+            Fluent:Notify({Title = "Auto Dungeon Reset", Content = "Disabled", Duration = 4})
         end
     end
 })
@@ -1872,11 +2095,10 @@ end
 local scriptURL = "https://raw.githubusercontent.com/H4CKERzinnn/Games/refs/heads/main/Arise%20Crossover"
 
 -- 1. NOTIFICAÇÕES (IGUAL À FOTO)
-local NotificationsGroup = MiscTab:AddSection("Avisos") -- Título curto para não poluir
+local NotificationsGroup = MiscTab:AddSection("Notifications") -- Título curto para não poluir
 
 NotificationsGroup:AddToggle("NotificationsToggle", {
-    Title = "Ativar Notificações do Script",
-    Description = "Liga/Desliga os avisos que aparecem no canto da tela.",
+    Title = "Enable Script Notifications",
     Default = true,
     Callback = function(Value)
         NotificationsEnabled = Value
@@ -1884,7 +2106,7 @@ NotificationsGroup:AddToggle("NotificationsToggle", {
 })
 
 -- 2. PROTEÇÃO E DUNGEON (IGUAL À FOTO)
-local AntiAFKGroup = MiscTab:AddSection("🛡️ Proteção e Dungeon")
+local AntiAFKGroup = MiscTab:AddSection("🛡️ Protection & Dungeon")
 
 AntiAFKGroup:AddToggle("AntiAFK", {
     Title = "Anti AFK (Ultra)", 
@@ -1908,7 +2130,7 @@ AntiAFKGroup:AddToggle("AntiAFK", {
 })
 
 AntiAFKGroup:AddToggle("RemoveTeleportUI", {
-    Title = "Remover TeleportScreen (Dungeon)", 
+    Title = "Remove TeleportScreen (Dungeon)", 
     Default = false, 
     Callback = function(v)
         Toggles.RemoveTeleportUI = v
@@ -1930,7 +2152,7 @@ AntiAFKGroup:AddToggle("RemoveTeleportUI", {
 })
 
 -- 3. PERFORMANCE E STATS (IGUAL À FOTO)
-local PerformanceGroup = MiscTab:AddSection("🚀 Performance e Stats")
+local PerformanceGroup = MiscTab:AddSection("🚀 Performance & Stats")
 
 PerformanceGroup:AddButton({
     Title = "FPS Booster Mobile", 
@@ -1941,7 +2163,7 @@ PerformanceGroup:AddButton({
 })
 
 PerformanceGroup:AddToggle("StatsDashboard", {
-    Title = "Ativar Dashboard de Stats", 
+    Title = "Enable Stats Dashboard", 
     Default = false, 
     Callback = function(v)
         Toggles.StatsDashboard = v
@@ -1960,7 +2182,7 @@ PerformanceGroup:AddToggle("StatsDashboard", {
 })
 
 PerformanceGroup:AddButton({
-    Title = "Rejoin (Reentrar no Servidor)", 
+    Title = "Rejoin Server", 
     Callback = function()
         game:GetService("TeleportService"):Teleport(game.PlaceId, game.Players.LocalPlayer)
     end
@@ -1970,27 +2192,25 @@ PerformanceGroup:AddButton({
 local AutoExecSection = MiscTab:AddSection("💾 Auto Execute")
 
 AutoExecSection:AddButton({
-    Title = "Instalar no Auto-Exec",
-    Description = "Salva o script na pasta do executor para abrir sozinho.",
+    Title = "Install to Auto-Exec",
     Callback = function()
         if writefile then
             local cmd = string.format('repeat task.wait() until game:IsLoaded(); loadstring(game:HttpGet("%s"))()', scriptURL)
             writefile("FourHub_AutoExec.lua", cmd)
-            Fluent:Notify({Title = "Sucesso", Content = "Salvo na pasta autoexec!", Duration = 5})
+            Fluent:Notify({Title = "Success", Content = "Salvo na pasta autoexec!", Duration = 5})
         end
     end
 })
 
 -- A CHAVE QUE VOLTOU:
 AutoExecSection:AddToggle("AutoTeleportLoad", {
-    Title = "Persistência de Teleporte",
-    Description = "Faz o script reabrir ao entrar em Dungeons/Portais.",
+    Title = "Teleport Persistence",
     Default = false,
     Callback = function(Value)
         Toggles.AutoExecute = Value
         if Value and queue_on_teleport then
             queue_on_teleport(string.format('loadstring(game:HttpGet("%s"))()', scriptURL))
-            Fluent:Notify({Title = "Ativado", Content = "Script carregará no próximo mapa!", Duration = 3})
+            Fluent:Notify({Title = "Enabled", Content = "Script carregará no próximo mapa!", Duration = 3})
         end
     end
 })
@@ -2004,14 +2224,14 @@ local AutoKeyRunning = false
 
 -- Inputs Slot 1
 AutoKeySection:AddInput("KeySlot1", {
-    Title = "Tecla Slot 1",
+    Title = "Slot 1 Key",
     Default = "1",
     Placeholder = "Ex: 1 ou Q",
     Callback = function() end -- Valor guardado em Fluent.Options
 })
 
 AutoKeySection:AddInput("TimeSlot1", {
-    Title = "Tempo Slot 1 (Segundos)",
+    Title = "Slot 1 Time (Seconds)",
     Default = "1",
     Placeholder = "Ex: 0.5",
     Callback = function() end
@@ -2019,14 +2239,14 @@ AutoKeySection:AddInput("TimeSlot1", {
 
 -- Inputs Slot 2
 AutoKeySection:AddInput("KeySlot2", {
-    Title = "Tecla Slot 2",
+    Title = "Slot 2 Key",
     Default = "G",
     Placeholder = "Ex: G ou E",
     Callback = function() end
 })
 
 AutoKeySection:AddInput("TimeSlot2", {
-    Title = "Tempo Slot 2 (Segundos)",
+    Title = "Slot 2 Time (Seconds)",
     Default = "5",
     Placeholder = "Ex: 2",
     Callback = function() end
@@ -2034,7 +2254,7 @@ AutoKeySection:AddInput("TimeSlot2", {
 
 -- Toggle para Ligar/Desligar
 AutoKeySection:AddToggle("ToggleAutoKey", {
-    Title = "Ativar Auto Key",
+    Title = "Enable Auto Key",
     Default = false,
     Callback = function(Value)
         AutoKeyRunning = Value
@@ -2213,5 +2433,5 @@ for Id, Option in pairs(Fluent.Options) do
     Option:OnChanged(function() GlobalSave() end)
 end
 
-Window:SelectTab(LojaTab)
+Window:SelectTab(MainTab)
 Fluent:Notify({Title = "FOUR HUB v3", Content = "✅ Misc e Auto Execute restaurados!", Duration = 4})
