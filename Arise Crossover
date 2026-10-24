@@ -327,7 +327,7 @@ local MountSystem = {
     Hopping = false,
     LastHop = 0,
     HoldDuration = 3,
-    HopDelay = 90,
+    HopDelay = 10,
     HopCooldown = 8
 }
 
@@ -420,24 +420,92 @@ local function HopToAnotherServer()
     end)
 end
 
-local function MountLoop()
-    if MountSystem.LoopRunning then return end
-    MountSystem.LoopRunning = true
-    task.spawn(function()
-        while MountSystem.AutoClaim or MountSystem.AutoHop do
+local function GetWildIslandModels()
+    local main = workspace:FindFirstChild("__Main")
+    local world = main and main:FindFirstChild("__World")
+    local wilds = world and world:FindFirstChild("Wilds")
+    local islands = {}
+    if not wilds then return islands end
+
+    for _, object in ipairs(wilds:GetChildren()) do
+        if object:IsA("Model") then
+            table.insert(islands, object)
+        end
+    end
+
+    table.sort(islands, function(a, b)
+        return a.Name < b.Name
+    end)
+    return islands
+end
+
+local function MoveToIsland(island)
+    local character = Player.Character or Player.CharacterAdded:Wait()
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local position = GetModelPosition(island)
+    if not root or not position then return false end
+    root.CFrame = CFrame.new(position + Vector3.new(0, 3, 0))
+    task.wait(0.6)
+    return true
+end
+
+local function GetStartCFrame()
+    local character = Player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    return root and root.CFrame or nil
+end
+
+local function RestoreStartCFrame(startCFrame)
+    if not startCFrame then return end
+    local character = Player.Character or Player.CharacterAdded:Wait()
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if root then root.CFrame = startCFrame end
+end
+
+local function ScanAllWildIslands()
+    local startCFrame = GetStartCFrame()
+    local foundMount = false
+    local islands = GetWildIslandModels()
+
+    for _, island in ipairs(islands) do
+        if not (MountSystem.AutoClaim or MountSystem.AutoHop) then
+            RestoreStartCFrame(startCFrame)
+            return true, true
+        end
+
+        if island and island.Parent and MoveToIsland(island) then
             local mounts = GetMountModels()
             if #mounts > 0 then
+                foundMount = true
                 if MountSystem.AutoClaim then
                     for _, mount in ipairs(mounts) do
                         if not (MountSystem.AutoClaim or MountSystem.AutoHop) then break end
                         if mount and mount.Parent then ClaimMount(mount) end
                         task.wait(0.2)
                     end
-                else
-                    task.wait(0.5)
                 end
-            elseif MountSystem.AutoHop then
-                -- Gives the player 10 seconds to turn Auto Hop off.
+            end
+        end
+        task.wait(0.2)
+    end
+
+    -- Auto Hop off: return to the exact position from before the scan.
+    if not MountSystem.AutoHop then
+        RestoreStartCFrame(startCFrame)
+    end
+    return foundMount, false
+end
+
+local function MountLoop()
+    if MountSystem.LoopRunning then return end
+    MountSystem.LoopRunning = true
+    task.spawn(function()
+        while MountSystem.AutoClaim or MountSystem.AutoHop do
+            local foundMount, stopped = ScanAllWildIslands()
+            if stopped then break end
+
+            if not foundMount and MountSystem.AutoHop then
+                -- Full scan finished: give the player 10 seconds to disable Auto Hop.
                 local shouldHop = true
                 for _ = 1, MountSystem.HopDelay do
                     if not MountSystem.AutoHop or #GetMountModels() > 0 then
@@ -446,10 +514,11 @@ local function MountLoop()
                     end
                     task.wait(1)
                 end
+
                 if shouldHop and MountSystem.AutoHop and #GetMountModels() == 0 then
                     HopToAnotherServer()
+                    task.wait(MountSystem.HopCooldown)
                 end
-                task.wait(MountSystem.HopCooldown)
             else
                 task.wait(0.5)
             end
